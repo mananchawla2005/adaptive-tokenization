@@ -1,1 +1,5 @@
 .agents
+AGENTS.md
+opencode.json
+__pycache__
+.venv
