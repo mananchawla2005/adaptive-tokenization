@@ -159,6 +159,150 @@ def evaluate_fn():
     return results
 
 
+@app.function(
+    gpu=f"{GPU_CONFIG}:{GPU_COUNT}",
+    timeout=1 * 60 * 60,
+    volumes={"/checkpoints": checkpoints_volume},
+)
+def oracle_fn():
+    import random
+    import torch
+    import numpy as np
+    from transformers import AutoTokenizer
+    from datasets import load_dataset
+    sys.path.insert(0, "/root")
+    from src.model import AdaptiveGPT2Model
+
+    checkpoints_volume.reload()
+
+    device = torch.device("cuda")
+    dtype = torch.bfloat16
+
+    tokenizer = AutoTokenizer.from_pretrained("gpt2")
+    tokenizer.pad_token = tokenizer.eos_token
+
+    adaptive_model = AdaptiveGPT2Model(base_model_name="gpt2", max_span_len=MAX_SPAN_LEN)
+    adaptive_model.to(device=device, dtype=dtype)
+    naive_model = AdaptiveGPT2Model(base_model_name="gpt2")
+    naive_model.to(device=device, dtype=dtype)
+
+    adapt_ckpt = "/checkpoints/adaptive/final.pt"
+    naive_ckpt = "/checkpoints/naive/final.pt"
+    if not os.path.exists(adapt_ckpt) or not os.path.exists(naive_ckpt):
+        print("ERROR: Checkpoints not found")
+        return None
+
+    adaptive_model.load_state_dict(torch.load(adapt_ckpt, map_location=device)["model_state_dict"])
+    naive_model.load_state_dict(torch.load(naive_ckpt, map_location=device)["model_state_dict"])
+    adaptive_model.eval()
+    naive_model.eval()
+
+    ds = load_dataset("Open-Orca/OpenOrca", split="train", streaming=True)
+    for ex in ds:
+        q = ex.get("question", "")
+        r = ex.get("response", "")
+        if q and r and len(q) > 50:
+            break
+
+    all_results = {}
+    for max_prompt, label in [(96, "96tok"), (384, "384tok")]:
+        prompt = tokenizer(q, add_special_tokens=True, truncation=True, max_length=max_prompt)["input_ids"]
+        answer = tokenizer(r, add_special_tokens=True, truncation=True, max_length=32)["input_ids"]
+        Pl, Al = len(prompt), len(answer)
+        print(f"\n=== {label}: Prompt={Pl}, Answer={Al} ===")
+
+        prompt_t = torch.tensor([prompt], dtype=torch.long).to(device)
+        answer_t = torch.tensor([answer], dtype=torch.long).to(device)
+
+        with torch.no_grad():
+            naive_loss = naive_model.forward_chat_no_compress(prompt_t, answer_t).item()
+        print(f"Naive no-merge baseline: {naive_loss:.4f}")
+
+        @torch.no_grad()
+        def eval_boundaries(boundaries):
+            span_bnd = torch.zeros(1, Pl, dtype=torch.bool, device=device)
+            span_assign = torch.zeros(1, Pl, dtype=torch.long, device=device)
+            pos = 0; sid = 0
+            for slen in boundaries:
+                if pos >= Pl: break
+                slen = min(slen, Pl - pos)
+                span_bnd[0, pos] = True
+                span_assign[0, pos:pos + slen] = sid
+                pos += slen; sid += 1
+            n_spans = int(span_bnd.sum().item())
+            K = MAX_SPAN_LEN; D = adaptive_model.config.n_embd
+            prompt_emb = adaptive_model.transformer.wte(prompt_t)
+            span_emb = torch.zeros(1, n_spans, K, D, dtype=dtype, device=device)
+            span_msk = torch.zeros(1, n_spans, K, dtype=torch.bool, device=device)
+            positions = torch.arange(Pl, device=device)
+            assigns = span_assign[0]; bnd_bool = span_bnd[0]
+            first_pos = positions[bnd_bool]
+            local_k = positions - first_pos[assigns]
+            valid = local_k < K
+            flat_idx = assigns * K + local_k
+            span_flat = span_emb[0].view(-1, D)
+            span_flat[flat_idx[valid]] = prompt_emb[0, positions[valid]]
+            span_msk[0].view(-1)[flat_idx[valid]] = True
+            merged = adaptive_model.span_encoder(span_emb, span_msk)
+            answer_emb = adaptive_model.transformer.wte(answer_t)
+            combined = torch.cat([merged, answer_emb], dim=1)
+            combined_mask = torch.ones(1, combined.shape[1], dtype=torch.long, device=device)
+            out = adaptive_model.transformer(inputs_embeds=combined, attention_mask=combined_mask)
+            logits = adaptive_model.lm_head(out.last_hidden_state)
+            labels = torch.cat([torch.full((1, n_spans), -100, dtype=torch.long, device=device), answer_t.clone()], dim=1)
+            shift_logits = logits[:, :-1].contiguous()
+            shift_labels = labels[:, 1:].contiguous()
+            loss = torch.nn.functional.cross_entropy(
+                shift_logits.view(-1, shift_logits.size(-1)).float(),
+                shift_labels.view(-1), ignore_index=-100)
+            return loss.item(), n_spans
+
+        adapt_no_merge = eval_boundaries([1] * Pl)[0]
+        print(f"Adapt no-merge baseline: {adapt_no_merge:.4f}")
+
+        results = [(0.0, adapt_no_merge)]
+        SAMPLES = 2000
+        for i in range(SAMPLES):
+            cr_target = random.random() * 0.9
+            boundaries = []; pos = 0
+            while pos < Pl:
+                remaining = Pl - pos; n_so_far = len(boundaries)
+                cur_cr = 1.0 - (n_so_far + remaining) / Pl if Pl > 0 else 0
+                if n_so_far > 0 and cur_cr >= cr_target:
+                    boundaries.append(1); pos += 1; continue
+                slen = random.randint(1, min(4, remaining) + 1)
+                boundaries.append(min(slen, remaining)); pos += min(slen, remaining)
+            loss_val, n_sc = eval_boundaries(boundaries)
+            cr_val = 1.0 - n_sc / Pl
+            results.append((cr_val, loss_val))
+            if (i + 1) % 500 == 0:
+                print(f"  sampled {i+1}/{SAMPLES}...")
+
+        crs = np.array([r[0] for r in results])
+        losses_arr = np.array([r[1] for r in results])
+
+        bins = np.linspace(0, 0.9, 19)
+        best_crs, best_losses_list = [], []
+        for j in range(len(bins) - 1):
+            mask = (crs >= bins[j]) & (crs < bins[j + 1])
+            if mask.sum() > 0:
+                idx = mask.nonzero()[0][losses_arr[mask].argmin()]
+                best_crs.append(float(crs[idx]))
+                best_losses_list.append(float(losses_arr[idx]))
+
+        print(f"Min loss: {losses_arr.min():.4f}, Max: {losses_arr.max():.4f}")
+        print(f"Frontier: {list(zip([f'{c:.2f}' for c in best_crs], [f'{l:.3f}' for l in best_losses_list]))}")
+
+        all_results[label] = {
+            "crs": crs.tolist(), "losses": losses_arr.tolist(),
+            "best_crs": best_crs, "best_losses": best_losses_list,
+            "adapt_no_merge": adapt_no_merge, "naive_no_merge": naive_loss,
+            "prompt_len": Pl, "answer_len": Al,
+        }
+
+    return all_results
+
+
 @app.local_entrypoint()
 def main():
     use_h100 = os.environ.get("USE_H100", "0") == "1"
