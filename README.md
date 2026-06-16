@@ -23,12 +23,12 @@ Adaptive:  [E0,E1] [E2] [E3,E4,E5] ... → SpanEncoder → [S0] [S1] [S2] ... �
 
 Evaluated on OpenOrca validation set. Both models tested with and without prompt compression.
 
-| Model | No Merge (loss/ppl/bpb) | Random Merge (loss/ppl/bpb) | CORE ↓ |
+| Model | No Merge (loss/ppl/bpb) | Random Merge (loss/ppl/bpb) | Compression degradation ↓ |
 |-------|------------------------|-----------------------------|--------|
 | **Naive** | 1.46 / 4.29 / 2.10 | 1.81 / 6.12 / 2.61 | 1.245 |
 | **Adaptive** | 1.53 / 4.60 / 2.20 | 1.63 / 5.10 / 2.35 | **1.067** |
 
-**CORE** = merged_loss / no_merge_loss. 1.0 = no degradation from compression.
+**Compression degradation** = merged_loss / no_merge_loss. 1.0 = no degradation from compression.
 
 ### Findings
 
@@ -44,7 +44,7 @@ Evaluated on OpenOrca validation set. Both models tested with and without prompt
 | **loss** | Cross-entropy on answer tokens (lower = better) |
 | **ppl** | Perplexity = e^loss. Effective "branching factor" |
 | **bpb** | Bits per byte = loss / ln(2). Encoding efficiency |
-| **CORE** | Compression ratio error = merged_loss / no_merge_loss |
+| **Compression degradation** | Compression ratio error = merged_loss / no_merge_loss |
 
 ## Project Structure
 
