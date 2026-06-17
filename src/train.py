@@ -50,17 +50,18 @@ def _setup_model_and_optimizer(
 
 def _save_checkpoint(model, optimizer, step, checkpoint_dir, volume, final=False):
     os.makedirs(checkpoint_dir, exist_ok=True)
-    name = "final.pt" if final else "latest.pt"
-    torch.save(
-        {
-            "step": step,
-            "model_state_dict": model.state_dict(),
-            "optimizer_state_dict": optimizer.state_dict(),
-        },
-        os.path.join(checkpoint_dir, name),
-    )
+    state_dict = {
+        "step": step,
+        "model_state_dict": model.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+    }
+    torch.save(state_dict, os.path.join(checkpoint_dir, "latest.pt"))
+    if final:
+        torch.save(state_dict, os.path.join(checkpoint_dir, "final.pt"))
+    else:
+        torch.save(state_dict, os.path.join(checkpoint_dir, f"step_{step}.pt"))
     volume.commit()
-    print(f"Checkpoint saved at step {step} ({name})")
+    print(f"Checkpoint saved at step {step} (latest + {'final' if final else f'step_{step}'})")
 
 
 def train_naive(
@@ -73,6 +74,7 @@ def train_naive(
     checkpoint_dir="/checkpoints/naive",
     volume=None,
     total_tokens=TOTAL_TOKENS,
+    tracker=None,
 ):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     use_amp = torch.cuda.is_available() and torch.cuda.is_bf16_supported()
@@ -135,20 +137,35 @@ def train_naive(
             optimizer.zero_grad()
 
             step += 1
+            lr = scheduler.get_last_lr()[0]
             pbar.set_postfix({
                 "loss": f"{accumulated_loss:.4f}",
-                "lr": f"{scheduler.get_last_lr()[0]:.2e}",
+                "lr": f"{lr:.2e}",
             })
             pbar.update(1)
+
+            if tracker is not None:
+                tracker.log({
+                    "train/loss": accumulated_loss,
+                    "train/lr": lr,
+                    "train/tokens": step * batch_size * grad_accum_steps * (MAX_PROMPT + MAX_ANSWER),
+                }, step=step)
             accumulated_loss = 0.0
 
-            if step % 5000 == 0 and volume is not None:
+            if step % 1000 == 0 and volume is not None:
                 _save_checkpoint(base_model, optimizer, step, checkpoint_dir, volume)
 
     if volume is not None:
         _save_checkpoint(base_model, optimizer, step, checkpoint_dir, volume, final=True)
 
     pbar.close()
+
+    if tracker is not None:
+        tracker.summary({
+            "final_step": step,
+            "total_tokens_processed": step * batch_size * grad_accum_steps * (MAX_PROMPT + MAX_ANSWER),
+        })
+
     return base_model, step
 
 
@@ -164,6 +181,7 @@ def train_adaptive(
     max_compression_ratio=0.7,
     max_span_len=4,
     total_tokens=TOTAL_TOKENS,
+    tracker=None,
 ):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     use_amp = torch.cuda.is_available() and torch.cuda.is_bf16_supported()
@@ -250,22 +268,40 @@ def train_adaptive(
             optimizer.zero_grad()
 
             step += 1
+            lr = scheduler.get_last_lr()[0]
             num_spans = getattr(base_model, '_last_num_spans', MAX_PROMPT)
-            compression = MAX_PROMPT / max(num_spans, 1)
+            actual_cr = 1.0 - num_spans / MAX_PROMPT
             pbar.set_postfix({
                 "loss": f"{accumulated_loss:.4f}",
                 "cr": f"{current_cr:.2f}",
-                "cmpr": f"{compression:.1f}x",
-                "lr": f"{scheduler.get_last_lr()[0]:.2e}",
+                "act_cr": f"{actual_cr:.2f}",
+                "lr": f"{lr:.2e}",
             })
             pbar.update(1)
+
+            if tracker is not None:
+                tracker.log({
+                    "train/loss": accumulated_loss,
+                    "train/lr": lr,
+                    "train/cr_schedule": current_cr,
+                    "train/cr_actual": actual_cr,
+                    "train/compression": MAX_PROMPT / max(num_spans, 1),
+                    "train/tokens": step * batch_size * grad_accum_steps * (MAX_PROMPT + MAX_ANSWER),
+                }, step=step)
             accumulated_loss = 0.0
 
-            if step % 5000 == 0 and volume is not None:
+            if step % 1000 == 0 and volume is not None:
                 _save_checkpoint(base_model, optimizer, step, checkpoint_dir, volume)
 
     if volume is not None:
         _save_checkpoint(base_model, optimizer, step, checkpoint_dir, volume, final=True)
 
     pbar.close()
+
+    if tracker is not None:
+        tracker.summary({
+            "final_step": step,
+            "total_tokens_processed": step * batch_size * grad_accum_steps * (MAX_PROMPT + MAX_ANSWER),
+        })
+
     return base_model, step

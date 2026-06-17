@@ -1,6 +1,6 @@
 """
 Phase 2 Hybrid: 3-stage boundary predictor training
-  Stage 1: Create oracle dataset (random sampling → best config per prompt)
+  Stage 1: Create oracle dataset (random sampling -> best config per prompt)
   Stage 2: Supervised imitation (BCE loss on best boundaries)
   Stage 3: Online GRPO fine-tuning
 """
@@ -30,7 +30,6 @@ NUM_SAMPLES_PER_PROMPT = 4
 
 
 def evaluate_boundaries_batch(adaptive_model, prompt_ids, answer_ids, all_boundaries, max_span_len=4):
-    """Same as before — returns losses as (B, S) tensor"""
     S_total, B, L = all_boundaries.shape
     device = prompt_ids.device
     K = max_span_len
@@ -121,13 +120,14 @@ def sample_random_boundaries(prompt_ids, num_samples, max_span_len=4):
     return boundaries
 
 
-# ═══════════════════════════════════════════════════════════════
+# ================================================================
 # Stage 1: Oracle Dataset
-# ═══════════════════════════════════════════════════════════════
+# ================================================================
 
 def stage1_create_oracle(
     adaptive_model, tokenizer, output_dir="/checkpoints/phase2",
     volume=None, num_prompts=NUM_PROMPTS_ORACLE, k_samples=K_SAMPLES,
+    tracker=None,
 ):
     device = next(adaptive_model.parameters()).device
     dtype = adaptive_model.transformer.wte.weight.dtype
@@ -174,6 +174,16 @@ def stage1_create_oracle(
             if collected >= num_prompts:
                 break
 
+        if tracker is not None:
+            best_cr_mean = cr[best_idx, torch.arange(B)].mean().item()
+            best_loss = losses_t[best_idx, torch.arange(B)].mean().item()
+            best_reward = rewards[best_idx, torch.arange(B)].mean().item()
+            tracker.log({
+                "oracle/best_cr": best_cr_mean,
+                "oracle/best_loss": best_loss,
+                "oracle/best_reward": best_reward,
+            }, step=collected)
+
     pbar.close()
 
     max_p = max(p.shape[0] for p in all_prompt_ids)
@@ -200,16 +210,23 @@ def stage1_create_oracle(
         volume.commit()
         print(f"Saved oracle dataset: {len(all_prompt_ids)} examples")
 
+    if tracker is not None:
+        tracker.summary({
+            "oracle_num_examples": len(all_prompt_ids),
+            "oracle_k_samples": k_samples,
+        })
+
     return prompts_t, answers_t, boundaries_t
 
 
-# ═══════════════════════════════════════════════════════════════
+# ================================================================
 # Stage 2: Supervised Imitation (BCE)
-# ═══════════════════════════════════════════════════════════════
+# ================================================================
 
 def stage2_train_imitation(
     adaptive_model, tokenizer, output_dir="/checkpoints/phase2",
     volume=None, epochs=BCE_EPOCHS, batch_size=BCE_BATCH,
+    tracker=None,
 ):
     device = next(adaptive_model.parameters()).device
     embed_weight = adaptive_model.transformer.wte.weight.detach()
@@ -234,6 +251,7 @@ def stage2_train_imitation(
 
     optimizer = AdamW(predictor.parameters(), lr=3e-4, weight_decay=0.01)
 
+    global_step = 0
     for epoch in range(epochs):
         predictor.train()
         total_loss = 0.0
@@ -251,28 +269,45 @@ def stage2_train_imitation(
             optimizer.step()
 
             total_loss += bce_loss.item()
+            global_step += 1
             pbar.set_postfix({"bce": f"{bce_loss.item():.4f}"})
 
-        print(f"Epoch {epoch+1}: avg BCE = {total_loss / len(loader):.4f}")
+            if tracker is not None:
+                tracker.log({"train/bce_loss": bce_loss.item()}, step=global_step)
+
+        avg_loss = total_loss / len(loader)
+        print(f"Epoch {epoch+1}: avg BCE = {avg_loss:.4f}")
+
+        if tracker is not None:
+            tracker.log({"train/bce_epoch_loss": avg_loss, "train/bce_epoch": epoch + 1}, step=(epoch + 1) * len(loader))
 
     if volume is not None:
         os.makedirs(output_dir, exist_ok=True)
-        torch.save({
+        state = {
             "predictor_state_dict": predictor.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
-        }, os.path.join(output_dir, "stage2_imitation.pt"))
+        }
+        torch.save(state, os.path.join(output_dir, "stage2_imitation.pt"))
+        torch.save(state, os.path.join(output_dir, "stage2_imitation_step_final.pt"))
         volume.commit()
+
+    if tracker is not None:
+        tracker.summary({
+            "bce_final_loss": total_loss / len(loader) if total_loss > 0 else 0,
+            "bce_epochs": epochs,
+        })
 
     return predictor
 
 
-# ═══════════════════════════════════════════════════════════════
+# ================================================================
 # Stage 3: Online GRPO Fine-tuning
-# ═══════════════════════════════════════════════════════════════
+# ================================================================
 
 def stage3_train_grpo(
     adaptive_model, tokenizer, predictor, output_dir="/checkpoints/phase2",
     volume=None, max_steps=GRPO_STEPS,
+    tracker=None,
 ):
     device = next(adaptive_model.parameters()).device
 
@@ -323,30 +358,55 @@ def stage3_train_grpo(
         step += 1
         accumulated_reward += rewards.mean().item()
 
+        avg_reward = accumulated_reward / max(1, step)
+        avg_loss = losses_t.mean().item()
+        avg_cr = compression_ratios.mean().item()
+        avg_adv = advantages.abs().mean().item()
+
         pbar.set_postfix({
-            "reward": f"{accumulated_reward / max(1, step):.3f}",
-            "loss": f"{losses_t.mean().item():.3f}",
-            "cr": f"{compression_ratios.mean().item():.2f}",
+            "reward": f"{avg_reward:.3f}",
+            "loss": f"{avg_loss:.3f}",
+            "cr": f"{avg_cr:.2f}",
         })
         pbar.update(1)
 
+        if tracker is not None:
+            tracker.log({
+                "train/reward": avg_reward,
+                "train/loss": avg_loss,
+                "train/cr": avg_cr,
+                "train/policy_loss": policy_loss.item(),
+                "train/advantages_mean": avg_adv,
+            }, step=step)
+
         if step % 500 == 0 and volume is not None:
             os.makedirs(output_dir, exist_ok=True)
-            torch.save({
+            state = {
                 "step": step,
                 "predictor_state_dict": predictor.state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),
-            }, os.path.join(output_dir, "stage3_grpo.pt"))
+            }
+            torch.save(state, os.path.join(output_dir, "stage3_grpo.pt"))
+            torch.save(state, os.path.join(output_dir, f"stage3_step_{step}.pt"))
             volume.commit()
 
     if volume is not None:
         os.makedirs(output_dir, exist_ok=True)
-        torch.save({
+        state = {
             "step": step,
             "predictor_state_dict": predictor.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
-        }, os.path.join(output_dir, "final_predictor.pt"))
+        }
+        torch.save(state, os.path.join(output_dir, "final_predictor.pt"))
+        torch.save(state, os.path.join(output_dir, f"predictor_step_{step}.pt"))
         volume.commit()
 
     pbar.close()
+
+    if tracker is not None:
+        tracker.summary({
+            "grpo_final_reward": accumulated_reward / max(1, step),
+            "grpo_steps": step,
+        })
+
     return predictor

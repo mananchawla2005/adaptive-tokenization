@@ -16,6 +16,8 @@ def evaluate_model(
     max_eval_tokens=5_000_000,
     eval_batch_size=2,
     eval_scenarios=None,
+    tracker=None,
+    prefix="eval",
 ):
     if eval_scenarios is None:
         eval_scenarios = ["no_merge", "random_merge"]
@@ -85,6 +87,16 @@ def evaluate_model(
         results["CORE"] = core_score
         print(f"[{model_name}] CORE (merged_loss / no_merge_loss): {core_score:.4f}")
 
+    if tracker is not None:
+        log_data = {}
+        for scenario, metrics in results.items():
+            if scenario == "CORE":
+                log_data[f"{prefix}/{model_name}/CORE"] = metrics
+            else:
+                for metric, value in metrics.items():
+                    log_data[f"{prefix}/{model_name}/{scenario}/{metric}"] = value
+        tracker.log(log_data)
+
     return results
 
 
@@ -95,6 +107,7 @@ def evaluate_both_models(
     tokenizer,
     max_eval_tokens=5_000_000,
     eval_batch_size=2,
+    tracker=None,
 ):
     print("\n" + "=" * 60)
     print("EVALUATION")
@@ -103,11 +116,13 @@ def evaluate_both_models(
     naive_results = evaluate_model(
         naive_model, tokenizer, model_name="Naive",
         max_eval_tokens=max_eval_tokens, eval_batch_size=eval_batch_size,
+        tracker=tracker,
     )
 
     adaptive_results = evaluate_model(
         adaptive_model, tokenizer, model_name="Adaptive",
         max_eval_tokens=max_eval_tokens, eval_batch_size=eval_batch_size,
+        tracker=tracker,
     )
 
     print("\n" + "=" * 60)

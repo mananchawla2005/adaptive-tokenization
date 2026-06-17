@@ -1,5 +1,6 @@
 import os
 import sys
+import time
 import modal
 from pathlib import Path
 
@@ -17,6 +18,8 @@ TOTAL_TOKENS = 100_000_000
 MAX_COMPRESSION_RATIO = 0.7
 MAX_SPAN_LEN = 4
 MAX_STEPS = 6000
+EXPERIMENT_SEED = 42
+VOLUME_NAME = "adaptive-tok-v2"
 
 SOURCE_DIR = Path(__file__).parent
 
@@ -29,6 +32,7 @@ image = (
         "datasets>=3.0.0",
         "accelerate>=1.0.0",
         "tqdm>=4.66.0",
+        "wandb>=0.18.0",
     )
     .add_local_dir(SOURCE_DIR / "src", remote_path="/root/src", copy=True)
 )
@@ -36,14 +40,19 @@ image = (
 app = modal.App("adaptive-tokenization", image=image)
 
 checkpoints_volume = modal.Volume.from_name(
-    "adaptive-tok-checkpoints", create_if_missing=True
+    VOLUME_NAME, create_if_missing=True
 )
+
+wandb_secret = modal.Secret.from_dict({
+    "WANDB_API_KEY": "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"
+})
 
 
 @app.function(
     gpu=f"{GPU_CONFIG}:{GPU_COUNT}",
     timeout=TRAINING_TIMEOUT,
     volumes={"/checkpoints": checkpoints_volume},
+    secrets=[wandb_secret],
     retries=modal.Retries(
         initial_delay=0.0,
         max_retries=3,
@@ -51,6 +60,31 @@ checkpoints_volume = modal.Volume.from_name(
     ),
 )
 def train_naive_fn():
+    from src.tracker import Tracker, generate_experiment_id, set_seed
+    set_seed(EXPERIMENT_SEED)
+    exp_id = generate_experiment_id()
+    tracker = Tracker(
+        name=f"{exp_id}-phase1-naive",
+        project="adaptive-tokenization",
+        group=exp_id,
+        job_type="phase1-naive",
+        config={
+            "seed": EXPERIMENT_SEED,
+            "model": "gpt2",
+            "batch_size": BATCH_SIZE,
+            "grad_accum": GRAD_ACCUM,
+            "max_steps": MAX_STEPS,
+            "learning_rate": LEARNING_RATE,
+            "warmup_steps": WARMUP_STEPS,
+            "max_prompt": MAX_PROMPT,
+            "max_answer": MAX_ANSWER,
+            "total_tokens": TOTAL_TOKENS,
+            "experiment_id": exp_id,
+            "volume": VOLUME_NAME,
+        },
+    )
+    tracker.init()
+
     sys.path.insert(0, "/root")
     from src.train import train_naive
 
@@ -65,8 +99,10 @@ def train_naive_fn():
         max_steps=MAX_STEPS,
         checkpoint_dir="/checkpoints/naive",
         volume=checkpoints_volume,
+        tracker=tracker,
     )
     print(f"Naive training completed: {steps} steps")
+    tracker.finish()
     return steps
 
 
@@ -74,6 +110,7 @@ def train_naive_fn():
     gpu=f"{GPU_CONFIG}:{GPU_COUNT}",
     timeout=TRAINING_TIMEOUT,
     volumes={"/checkpoints": checkpoints_volume},
+    secrets=[wandb_secret],
     retries=modal.Retries(
         initial_delay=0.0,
         max_retries=3,
@@ -81,6 +118,33 @@ def train_naive_fn():
     ),
 )
 def train_adaptive_fn():
+    from src.tracker import Tracker, generate_experiment_id, set_seed
+    set_seed(EXPERIMENT_SEED)
+    exp_id = generate_experiment_id()
+    tracker = Tracker(
+        name=f"{exp_id}-phase1-adaptive",
+        project="adaptive-tokenization",
+        group=exp_id,
+        job_type="phase1-adaptive",
+        config={
+            "seed": EXPERIMENT_SEED,
+            "model": "gpt2",
+            "batch_size": BATCH_SIZE,
+            "grad_accum": GRAD_ACCUM,
+            "max_steps": MAX_STEPS,
+            "learning_rate": LEARNING_RATE,
+            "warmup_steps": WARMUP_STEPS,
+            "max_compression_ratio": MAX_COMPRESSION_RATIO,
+            "max_span_len": MAX_SPAN_LEN,
+            "max_prompt": MAX_PROMPT,
+            "max_answer": MAX_ANSWER,
+            "total_tokens": TOTAL_TOKENS,
+            "experiment_id": exp_id,
+            "volume": VOLUME_NAME,
+        },
+    )
+    tracker.init()
+
     sys.path.insert(0, "/root")
     from src.train import train_adaptive
 
@@ -97,8 +161,10 @@ def train_adaptive_fn():
         volume=checkpoints_volume,
         max_compression_ratio=MAX_COMPRESSION_RATIO,
         max_span_len=MAX_SPAN_LEN,
+        tracker=tracker,
     )
     print(f"Adaptive training completed: {steps} steps")
+    tracker.finish()
     return steps
 
 
@@ -106,8 +172,27 @@ def train_adaptive_fn():
     gpu=f"{GPU_CONFIG}:{GPU_COUNT}",
     timeout=3 * 60 * 60,
     volumes={"/checkpoints": checkpoints_volume},
+    secrets=[wandb_secret],
 )
 def evaluate_fn():
+    from src.tracker import Tracker, generate_experiment_id, set_seed
+    set_seed(EXPERIMENT_SEED)
+    exp_id = generate_experiment_id()
+    tracker = Tracker(
+        name=f"{exp_id}-phase1-eval",
+        project="adaptive-tokenization",
+        group=exp_id,
+        job_type="phase1-eval",
+        config={
+            "seed": EXPERIMENT_SEED,
+            "max_eval_tokens": 5_000_000,
+            "eval_batch_size": 2,
+            "experiment_id": exp_id,
+            "volume": VOLUME_NAME,
+        },
+    )
+    tracker.init()
+
     import torch
     from transformers import AutoTokenizer
     sys.path.insert(0, "/root")
@@ -154,17 +239,41 @@ def evaluate_fn():
         tokenizer,
         max_eval_tokens=5_000_000,
         eval_batch_size=2,
+        tracker=tracker,
     )
 
+    if tracker is not None:
+        tracker.summary({
+            "naive_CORE": results[0].get("CORE", 0),
+            "adaptive_CORE": results[1].get("CORE", 0),
+        })
+    tracker.finish()
     return results
 
 
 @app.function(
     gpu=f"{GPU_CONFIG}:{GPU_COUNT}",
-    timeout=1 * 60 * 60,
+    timeout=2 * 60 * 60,
     volumes={"/checkpoints": checkpoints_volume},
+    secrets=[wandb_secret],
 )
 def oracle_fn():
+    from src.tracker import Tracker, generate_experiment_id, set_seed
+    set_seed(EXPERIMENT_SEED)
+    exp_id = generate_experiment_id()
+    tracker = Tracker(
+        name=f"{exp_id}-oracle",
+        project="adaptive-tokenization",
+        group=exp_id,
+        job_type="oracle",
+        config={
+            "seed": EXPERIMENT_SEED,
+            "experiment_id": exp_id,
+            "volume": VOLUME_NAME,
+        },
+    )
+    tracker.init()
+
     import random
     import torch
     import numpy as np
@@ -198,6 +307,7 @@ def oracle_fn():
     naive_model.eval()
 
     ds = load_dataset("Open-Orca/OpenOrca", split="train", streaming=True)
+    ds = ds.shuffle(seed=EXPERIMENT_SEED)
     for ex in ds:
         q = ex.get("question", "")
         r = ex.get("response", "")
@@ -300,6 +410,17 @@ def oracle_fn():
             "prompt_len": Pl, "answer_len": Al,
         }
 
+        if tracker is not None:
+            for j, (c, l) in enumerate(zip(best_crs, best_losses_list)):
+                tracker.log({f"oracle/{label}/frontier_cr": c, f"oracle/{label}/frontier_loss": l}, step=j)
+            tracker.summary({
+                f"oracle/{label}/adapt_no_merge": adapt_no_merge,
+                f"oracle/{label}/naive_no_merge": naive_loss,
+                f"oracle/{label}/min_loss": float(losses_arr.min()),
+                f"oracle/{label}/max_loss": float(losses_arr.max()),
+            })
+
+    tracker.finish()
     return all_results
 
 
@@ -309,7 +430,7 @@ def main():
     gpu_str = "H100" if use_h100 else GPU_CONFIG
 
     print("=" * 60)
-    print("ADAPTIVE TOKENIZATION — POST-TRAINING PIPELINE")
+    print("ADAPTIVE TOKENIZATION -- POST-TRAINING PIPELINE")
     print("=" * 60)
     print(f"GPU: {gpu_str}:{GPU_COUNT}")
     print(f"Dataset: Open-Orca/OpenOrca (streaming)")
@@ -318,6 +439,8 @@ def main():
     print(f"Total tokens: {TOTAL_TOKENS:,}")
     print(f"Max steps: {MAX_STEPS:,}")
     print(f"Max compression: {MAX_COMPRESSION_RATIO} (curriculum)")
+    print(f"Seed: {EXPERIMENT_SEED}")
+    print(f"Volume: {VOLUME_NAME}")
     print("=" * 60)
 
     print("\n[1/3] Starting NAIVE training (standard GPT-2 fine-tuning)...")

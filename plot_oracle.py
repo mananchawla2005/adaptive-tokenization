@@ -2,17 +2,17 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-# 96-token data
-f96_crs =   [0.03, 0.06, 0.14, 0.17, 0.21, 0.25, 0.32, 0.35, 0.41, 0.49, 0.52, 0.58, 0.61, 0.66, 0.71]
-f96_losses =[6.213,6.167,6.182,6.196,6.209,6.231,6.243,6.253,6.326,6.309,6.343,6.240,6.161,6.170,6.223]
-f96_naive  = 6.322
-f96_adapt  = 6.221
+# 96-token data (from oracle run 2026-06-17)
+f96_crs =    [0.04, 0.09, 0.12, 0.20, 0.24, 0.26, 0.34, 0.38, 0.45, 0.49, 0.53, 0.58, 0.61, 0.67, 0.71]
+f96_losses = [5.306, 5.354, 5.329, 5.329, 5.282, 5.266, 5.253, 5.219, 5.218, 5.202, 5.190, 5.045, 5.006, 4.957, 5.032]
+f96_naive  = 5.2635
+f96_adapt  = 5.3542
 
-# 384-token data
-f384_crs   = [0.04, 0.05, 0.13, 0.19, 0.24, 0.29, 0.31, 0.35, 0.41, 0.46, 0.55, 0.56, 0.61, 0.66, 0.70]
-f384_losses=[2.185,2.170,2.156,2.119,2.104,2.128,2.103,2.110,2.149,2.123,2.118,2.138,2.665,3.943,4.152]
-f384_naive = 2.046
-f384_adapt = 2.217
+# 384-token data (from oracle run 2026-06-17)
+f384_crs =    [0.05, 0.09, 0.10, 0.20, 0.22, 0.28, 0.34, 0.39, 0.42, 0.50, 0.53, 0.60, 0.63, 0.65, 0.70]
+f384_losses = [4.509, 4.474, 4.472, 4.462, 4.411, 4.372, 4.325, 4.409, 4.405, 4.313, 4.346, 4.208, 4.147, 4.044, 4.274]
+f384_naive = 4.5079
+f384_adapt = 4.5446
 
 fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
 
@@ -27,7 +27,7 @@ def plot_oracle(ax, crs, losses, naive_loss, adapt_loss, prompt_len, title):
     # Green zone: adaptive+compression beats naive
     for cr, l in zip(crs, losses):
         if l < naive_loss:
-            ax.axvspan(cr-0.02, cr+0.02, alpha=0.08, color="green")
+            ax.axvspan(cr - 0.02, cr + 0.02, alpha=0.08, color="green")
     ax.axvspan(0, 1, alpha=0.04, color="green", label="Adaptive+compression < Naive no-merge")
 
     best_idx = losses.index(adapt_best)
@@ -48,13 +48,13 @@ def plot_oracle(ax, crs, losses, naive_loss, adapt_loss, prompt_len, title):
     ax2t = ax.twiny()
     ax2t.set_xlim(ax.get_xlim())
     ax2t.set_xticks([0.0, 0.2, 0.4, 0.6])
-    ax2t.set_xticklabels([f"{int(prompt_len*(1-t))}" for t in [0.0, 0.2, 0.4, 0.6]])
+    ax2t.set_xticklabels([f"{int(prompt_len * (1 - t))}" for t in [0.0, 0.2, 0.4, 0.6]])
     ax2t.set_xlabel("Span count", fontsize=10)
 
 plot_oracle(ax1, f96_crs, f96_losses, f96_naive, f96_adapt, 96, "96-token Prompt")
-plot_oracle(ax2, f384_crs, f384_losses, f384_naive, f384_adapt, 157, "157-token Prompt")
+plot_oracle(ax2, f384_crs, f384_losses, f384_naive, f384_adapt, 384, "384-token Prompt")
 
 plt.suptitle("Adaptive Tokenization Oracle: Adaptive + Compression vs Naive Baseline", fontsize=15, y=1.02)
 plt.tight_layout()
-plt.savefig("oracle_dual.png", dpi=150, bbox_inches="tight")
-print("Saved oracle_dual.png")
+plt.savefig("oracle_dual_v2.png", dpi=150, bbox_inches="tight")
+print("Saved oracle_dual_v2.png")
