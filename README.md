@@ -145,11 +145,9 @@ adaptive_tokenization/
 │   └── hybrid_train.py       # Phase 2: 3-stage training (oracle → BCE → GRPO)
 ├── modal_app.py              # Phase 1 Modal orchestration
 ├── phase2_app.py             # Phase 2 Modal orchestration
-├── oracle_dual_v2.png        # Oracle analysis plot
+├── oracle_dual.png        # Oracle analysis plot
 ├── plot_oracle.py            # Plot generation script
-├── artifacts_v2/             # Downloaded checkpoints (13 GB)
-├── README.md
-└── EXPERIMENTS.md            # Detailed experiment log
+└── README.md
 ```
 
 ## Running
