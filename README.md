@@ -18,6 +18,7 @@ Adaptive:  [E0,E1] [E2] [E3,E4,E5] ... → SpanEncoder → [S0] [S1] [S2] ... �
 - **Loss**: Standard autoregressive cross-entropy on answer tokens only (prompt compression = preprocessing).
 - **Dataset**: [Open-Orca/OpenOrca](https://huggingface.co/datasets/Open-Orca/OpenOrca) — instruction/response pairs.
 - **Tracking**: Full [Weights & Biases](https://wandb.ai/highattacker/adaptive-tokenization) logging: training curves, eval metrics, oracle frontiers, merge visualization tables.
+- **Artifacts**: [Huggingface Bucket](https://huggingface.co/buckets/manan05/adaptive-tokenization)
 - **Reproducibility**: Seed=42 fixed across all runs. Git commit `d4fa4a9`. Experiment ID `exp-YYYYMMDD-HHMMSS-g{commit}`.
 
 ## Phase 1: SpanEncoder Training
