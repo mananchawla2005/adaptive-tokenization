@@ -44,7 +44,7 @@ checkpoints_volume = modal.Volume.from_name(
 )
 
 wandb_secret = modal.Secret.from_dict({
-    "WANDB_API_KEY": "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"
+    "WANDB_API_KEY": ""
 })
 
 
