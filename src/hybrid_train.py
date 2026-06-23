@@ -19,7 +19,8 @@ from .boundary_predictor import BoundaryPredictor
 from .boundary_sampling import sample_boundaries_grpo, boundaries_to_log_probs
 
 
-BETA = 0.3
+BETA = 0.6
+LOSS_CEILING = 2.40  # no_merge baseline (2.288) + 5% margin
 K_SAMPLES = 128
 NUM_PROMPTS_ORACLE = 2000
 BCE_EPOCHS = 5
@@ -29,7 +30,7 @@ GROUP_SIZE = 16
 NUM_SAMPLES_PER_PROMPT = 4
 
 
-def evaluate_boundaries_batch(adaptive_model, prompt_ids, answer_ids, all_boundaries, max_span_len=4):
+def evaluate_boundaries_batch(adaptive_model, prompt_ids, answer_ids, all_boundaries, max_span_len=4, answer_mask=None):
     S_total, B, L = all_boundaries.shape
     device = prompt_ids.device
     K = max_span_len
@@ -41,6 +42,7 @@ def evaluate_boundaries_batch(adaptive_model, prompt_ids, answer_ids, all_bounda
         prompt_emb_b = adaptive_model.transformer.wte(prompt_ids[b_idx].unsqueeze(0))
         answer_id_b = answer_ids[b_idx].unsqueeze(0)
         answer_emb_b = adaptive_model.transformer.wte(answer_id_b)
+        am_b = answer_mask[b_idx].unsqueeze(0) if answer_mask is not None else None
         Al = answer_ids.shape[1]
         config_losses = []
 
@@ -78,9 +80,12 @@ def evaluate_boundaries_batch(adaptive_model, prompt_ids, answer_ids, all_bounda
             out = adaptive_model.transformer(inputs_embeds=combined, attention_mask=combined_mask)
             logits = adaptive_model.lm_head(out.last_hidden_state)
 
+            answer_labels = answer_id_b.clone()
+            if am_b is not None:
+                answer_labels[am_b == 0] = -100
             labels = torch.cat([
                 torch.full((1, n_spans), -100, dtype=torch.long, device=device),
-                answer_id_b.clone(),
+                answer_labels,
             ], dim=1)
             shift_logits = logits[:, :-1].contiguous()
             shift_labels = labels[:, 1:].contiguous()
@@ -112,7 +117,7 @@ def sample_random_boundaries(prompt_ids, num_samples, max_span_len=4):
                         pos += 1; sid += 1
                         continue
                 remaining = L - pos
-                slen = random.randint(1, min(max_span_len, remaining) + 1)
+                slen = random.randint(1, min(max_span_len, remaining))
                 slen = min(slen, remaining)
                 boundaries[k, b, pos] = True
                 pos += slen; sid += 1
@@ -154,12 +159,17 @@ def stage1_create_oracle(
         with torch.no_grad():
             losses_raw = evaluate_boundaries_batch(
                 adaptive_model, prompt_ids, answer_ids, boundaries, max_span_len=4,
+                answer_mask=batch.get("answer_mask"),
             )
 
         losses_t = losses_raw.t().contiguous()
-        n_spans = boundaries.sum(dim=-1).float()
-        cr = 1.0 - n_spans / L
-        rewards = -losses_t + BETA * cr
+        prompt_mask = batch["prompt_mask"].to(device)
+        n_spans = (boundaries & prompt_mask.unsqueeze(0)).sum(dim=-1).float()
+        real_lens = prompt_mask.sum(dim=1).float()
+        cr = 1.0 - n_spans / real_lens.clamp_min(1)
+
+        cr_reward = torch.where(losses_t <= LOSS_CEILING, BETA * cr, torch.zeros_like(cr))
+        rewards = -losses_t + cr_reward
 
         best_idx = rewards.argmax(dim=0)
 
@@ -243,7 +253,7 @@ def stage2_train_imitation(
     prompts_t = data["prompts"]
     boundaries_t = data["boundaries"].float()
 
-    predictor = BoundaryPredictor(embed_weight=embed_weight, hidden_dim=256, num_layers=1, num_heads=4)
+    predictor = BoundaryPredictor(embed_weight=embed_weight, hidden_dim=512, num_layers=2, num_heads=8)
     predictor.to(device)
 
     dataset = TensorDataset(prompts_t, boundaries_t)
@@ -326,27 +336,35 @@ def stage3_train_grpo(
 
         prompt_ids = batch["prompt_ids"].to(device)
         answer_ids = batch["answer_ids"].to(device)
+        prompt_mask = batch["prompt_mask"].to(device)
         B, Pl = prompt_ids.shape
 
         boundaries = sample_boundaries_grpo(
-            predictor, prompt_ids, num_samples=NUM_SAMPLES_PER_PROMPT, max_span_len=4,
+            predictor, prompt_ids, attention_mask=prompt_mask,
+            num_samples=NUM_SAMPLES_PER_PROMPT, max_span_len=4,
         )
 
         with torch.no_grad():
             losses_raw = evaluate_boundaries_batch(
                 adaptive_model, prompt_ids, answer_ids, boundaries, max_span_len=4,
+                answer_mask=batch.get("answer_mask"),
             )
         losses_t = losses_raw.t().contiguous().to(device)
 
-        n_spans = boundaries.sum(dim=-1).float()
-        compression_ratios = 1.0 - n_spans / Pl
-        rewards = -losses_t + BETA * compression_ratios
+        n_spans = (boundaries & prompt_mask.unsqueeze(0)).sum(dim=-1).float()
+        real_lens = prompt_mask.sum(dim=1).float()
+        compression_ratios = 1.0 - n_spans / real_lens.clamp_min(1)
+
+        cr_reward = torch.where(losses_t <= LOSS_CEILING, BETA * compression_ratios, torch.zeros_like(compression_ratios))
+        rewards = -losses_t + cr_reward
 
         mean_r = rewards.mean(dim=0, keepdim=True)
         std_r = rewards.std(dim=0, keepdim=True) + 1e-8
         advantages = (rewards - mean_r) / std_r
 
-        log_probs_per = boundaries_to_log_probs(predictor, prompt_ids, boundaries)
+        log_probs_per = boundaries_to_log_probs(
+            predictor, prompt_ids, boundaries, attention_mask=prompt_mask,
+        )
 
         policy_loss = -(log_probs_per.flatten() * advantages.flatten()).mean()
 

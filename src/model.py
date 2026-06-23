@@ -161,7 +161,7 @@ class AdaptiveGPT2Model(nn.Module):
         )
         return loss
 
-    def forward_chat(self, prompt_ids, answer_ids, tokenizer=None, compression_ratio=0.5, rng=None):
+    def forward_chat(self, prompt_ids, answer_ids, tokenizer=None, compression_ratio=0.5, rng=None, prompt_mask=None, answer_mask=None):
         B, Pl = prompt_ids.shape
         Al = answer_ids.shape[1]
         device = prompt_ids.device
@@ -202,6 +202,8 @@ class AdaptiveGPT2Model(nn.Module):
         prompt_len = merged_prompt.shape[1]
         prompt_labels = torch.full((B, prompt_len), -100, dtype=torch.long, device=device)
         answer_labels = answer_ids.clone()
+        if answer_mask is not None:
+            answer_labels[answer_mask == 0] = -100
         labels = torch.cat([prompt_labels, answer_labels], dim=1)
 
         shift_logits = logits[:, :-1, :].contiguous()
@@ -216,7 +218,7 @@ class AdaptiveGPT2Model(nn.Module):
         self._last_num_spans = merged_prompt.shape[1]
         return loss
 
-    def forward_chat_no_compress(self, prompt_ids, answer_ids):
+    def forward_chat_no_compress(self, prompt_ids, answer_ids, prompt_mask=None, answer_mask=None):
         B, Pl = prompt_ids.shape
         device = prompt_ids.device
 
@@ -225,7 +227,11 @@ class AdaptiveGPT2Model(nn.Module):
 
         combined_embeds = torch.cat([prompt_embeds, answer_embeds], dim=1)
         B_s, total_len = combined_embeds.shape[:2]
-        combined_mask = torch.ones(B_s, total_len, dtype=torch.long, device=device)
+
+        if prompt_mask is not None and answer_mask is not None:
+            combined_mask = torch.cat([prompt_mask, answer_mask], dim=1)
+        else:
+            combined_mask = torch.ones(B_s, total_len, dtype=torch.long, device=device)
 
         outputs = self.transformer(
             inputs_embeds=combined_embeds,
@@ -237,6 +243,8 @@ class AdaptiveGPT2Model(nn.Module):
 
         prompt_labels = torch.full((B, Pl), -100, dtype=torch.long, device=device)
         answer_labels = answer_ids.clone()
+        if answer_mask is not None:
+            answer_labels[answer_mask == 0] = -100
         labels = torch.cat([prompt_labels, answer_labels], dim=1)
 
         shift_logits = logits[:, :-1, :].contiguous()

@@ -380,7 +380,7 @@ def oracle_fn():
                 cur_cr = 1.0 - (n_so_far + remaining) / Pl if Pl > 0 else 0
                 if n_so_far > 0 and cur_cr >= cr_target:
                     boundaries.append(1); pos += 1; continue
-                slen = random.randint(1, min(4, remaining) + 1)
+                slen = random.randint(1, min(4, remaining))
                 boundaries.append(min(slen, remaining)); pos += min(slen, remaining)
             loss_val, n_sc = eval_boundaries(boundaries)
             cr_val = 1.0 - n_sc / Pl

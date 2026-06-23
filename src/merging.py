@@ -30,7 +30,7 @@ def build_span_masks_random(
                     sid += 1
                     continue
 
-            span_len = rng.randint(1, min(max_span_len, L - pos) + 1)
+            span_len = rng.randint(1, min(max_span_len, L - pos))
             span_len = min(span_len, L - pos)
 
             span_boundaries[b, pos] = True

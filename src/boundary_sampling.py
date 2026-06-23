@@ -30,7 +30,7 @@ def sample_boundaries_grpo(predictor, input_ids, attention_mask=None, num_sample
             p_boundary = torch.where(noise_mask, torch.full_like(p_boundary, 0.5), p_boundary)
 
         if attention_mask is not None:
-            p_boundary = p_boundary * attention_mask.float() + (1 - attention_mask.float())
+            p_boundary = p_boundary * attention_mask.float()  # padding → 0 → always merge
         p_boundary[:, 0] = 1.0
 
         merged_count = torch.zeros(B, L, dtype=torch.long, device=device)
@@ -72,7 +72,10 @@ def boundaries_to_log_probs(predictor, input_ids, boundaries, attention_mask=Non
 
     if attention_mask is not None:
         mask = attention_mask.unsqueeze(0).float()
-        mask[:, :, 0] = 0.0
+        mask[:, :, 0] = 0.0  # exclude forced first boundary from log-prob
         log_probs = log_probs * mask
+        norm = mask.sum(dim=-1).clamp_min(1)
+    else:
+        norm = L
 
-    return log_probs.sum(dim=-1) / L
+    return log_probs.sum(dim=-1) / norm

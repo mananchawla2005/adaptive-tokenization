@@ -2,17 +2,17 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-# 96-token data (from oracle run 2026-06-17)
-f96_crs =    [0.04, 0.09, 0.12, 0.20, 0.24, 0.26, 0.34, 0.38, 0.45, 0.49, 0.53, 0.58, 0.61, 0.67, 0.71]
-f96_losses = [5.306, 5.354, 5.329, 5.329, 5.282, 5.266, 5.253, 5.219, 5.218, 5.202, 5.190, 5.045, 5.006, 4.957, 5.032]
-f96_naive  = 5.2635
-f96_adapt  = 5.3542
+# 96-token data (from oracle run 2026-06-22, bugs fixed)
+f96_crs =    [0.01, 0.05, 0.15, 0.17, 0.21, 0.29, 0.34, 0.39, 0.43, 0.47, 0.51, 0.57, 0.61, 0.66]
+f96_losses = [5.301, 5.302, 5.312, 5.300, 5.289, 5.269, 5.246, 5.223, 5.186, 5.205, 5.002, 4.916, 5.017, 5.067]
+f96_naive  = 5.2564
+f96_adapt  = 5.3319
 
-# 384-token data (from oracle run 2026-06-17)
-f384_crs =    [0.05, 0.09, 0.10, 0.20, 0.22, 0.28, 0.34, 0.39, 0.42, 0.50, 0.53, 0.60, 0.63, 0.65, 0.70]
-f384_losses = [4.509, 4.474, 4.472, 4.462, 4.411, 4.372, 4.325, 4.409, 4.405, 4.313, 4.346, 4.208, 4.147, 4.044, 4.274]
-f384_naive = 4.5079
-f384_adapt = 4.5446
+# 384-token data (from oracle run 2026-06-22, bugs fixed)
+f384_crs =    [0.04, 0.07, 0.15, 0.18, 0.20, 0.29, 0.31, 0.37, 0.42, 0.50, 0.52, 0.59, 0.61, 0.65]
+f384_losses = [4.443, 4.429, 4.446, 4.420, 4.361, 4.380, 4.412, 4.454, 4.448, 4.350, 4.195, 3.988, 3.903, 4.486]
+f384_naive = 4.4918
+f384_adapt = 4.4991
 
 fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
 
@@ -56,5 +56,5 @@ plot_oracle(ax2, f384_crs, f384_losses, f384_naive, f384_adapt, 384, "384-token 
 
 plt.suptitle("Adaptive Tokenization Oracle: Adaptive + Compression vs Naive Baseline", fontsize=15, y=1.02)
 plt.tight_layout()
-plt.savefig("oracle_dual_v2.png", dpi=150, bbox_inches="tight")
-print("Saved oracle_dual_v2.png")
+plt.savefig("oracle_dual.png", dpi=150, bbox_inches="tight")
+print("Saved oracle_dual.png")

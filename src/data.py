@@ -70,16 +70,22 @@ def collate_fn(batch):
 
     prompt_ids = torch.full((B, max_p), 0, dtype=torch.long)
     answer_ids = torch.full((B, max_a), 0, dtype=torch.long)
+    prompt_mask = torch.zeros(B, max_p, dtype=torch.long)
+    answer_mask = torch.zeros(B, max_a, dtype=torch.long)
 
     for i, ex in enumerate(batch):
         pl = ex["prompt_ids"].shape[0]
         al = ex["answer_ids"].shape[0]
         prompt_ids[i, :pl] = ex["prompt_ids"]
         answer_ids[i, :al] = ex["answer_ids"]
+        prompt_mask[i, :pl] = 1
+        answer_mask[i, :al] = 1
 
     return {
         "prompt_ids": prompt_ids,
         "answer_ids": answer_ids,
+        "prompt_mask": prompt_mask,
+        "answer_mask": answer_mask,
     }
 
 

@@ -204,9 +204,14 @@ def evaluate_hybrid_fn():
     max_a = max(len(a) for a in answers)
     prompt_t = torch.full((64, max_p), 0, dtype=torch.long).to(device)
     answer_t = torch.full((64, max_a), 0, dtype=torch.long).to(device)
+    prompt_m = torch.zeros(64, max_p, dtype=torch.long, device=device)
+    answer_m = torch.zeros(64, max_a, dtype=torch.long, device=device)
     for i in range(64):
-        prompt_t[i, :len(prompts[i])] = torch.tensor(prompts[i])
-        answer_t[i, :len(answers[i])] = torch.tensor(answers[i])
+        pl = len(prompts[i]); al = len(answers[i])
+        prompt_t[i, :pl] = torch.tensor(prompts[i])
+        answer_t[i, :al] = torch.tensor(answers[i])
+        prompt_m[i, :pl] = 1
+        answer_m[i, :al] = 1
 
     def _decode_merge(predictor, label):
         """Decode how the predictor merges the first 10 prompts."""
@@ -214,10 +219,12 @@ def evaluate_hybrid_fn():
         table = wandb.Table(columns=["idx", "prompt", f"{label}_spans", f"{label}_cr"])
         for i in range(min(10, len(prompts))):
             pl = len(prompts[i])
-            single = prompt_t[i:i+1, :pl]
+            single = prompt_t[i:i+1]  # full padded length (same as training)
+            single_mask = prompt_m[i:i+1]
             with torch.no_grad():
-                bnd = sample_boundaries_grpo(predictor, single, num_samples=1, max_span_len=4)
-            boundaries = bnd[0, 0].cpu()
+                bnd = sample_boundaries_grpo(predictor, single, attention_mask=single_mask,
+                                             num_samples=1, max_span_len=4)
+            boundaries = bnd[0, 0, :pl].cpu()  # only real token positions
             # Build spans: group tokens between boundary=True positions
             token_ids = prompts[i]
             spans = []
@@ -239,7 +246,7 @@ def evaluate_hybrid_fn():
         return table
 
     def _eval_predictor(ckpt, label):
-        p = BoundaryPredictor(embed_weight=embed_weight, hidden_dim=256, num_layers=1, num_heads=4)
+        p = BoundaryPredictor(embed_weight=embed_weight, hidden_dim=512, num_layers=2, num_heads=8)
         p.to(device=device)
         ckpt_path = f"/checkpoints/phase2/{ckpt}"
         if not os.path.exists(ckpt_path):
@@ -248,22 +255,28 @@ def evaluate_hybrid_fn():
         p.load_state_dict(torch.load(ckpt_path, map_location=device)["predictor_state_dict"])
         p.eval()
         with torch.no_grad():
-            bnd = sample_boundaries_grpo(p, prompt_t, num_samples=1, max_span_len=4)
-            loss = evaluate_boundaries_batch(adaptive_model, prompt_t, answer_t, bnd, 4)
+            bnd = sample_boundaries_grpo(p, prompt_t, attention_mask=prompt_m,
+                                         num_samples=1, max_span_len=4)
+            loss = evaluate_boundaries_batch(adaptive_model, prompt_t, answer_t, bnd, 4, answer_mask=answer_m)
             loss = loss.mean().item()
-            cr = 1.0 - bnd.float().sum(dim=-1).mean().item() / max_p
+            real_spans = (bnd & prompt_m.unsqueeze(0)).float().sum(dim=-1).mean().item()
+            real_tokens = prompt_m.float().sum(dim=-1).mean().item()
+            cr = 1.0 - real_spans / real_tokens
         core_val = loss / max(no_merge_loss, 1e-8)
         print(f"[{label}] loss={loss:.4f}, cr={cr:.2f}, CORE={core_val:.4f}")
         return {"loss": loss, "cr": cr, "CORE": core_val}
 
     with torch.no_grad():
-        no_merge_loss = adaptive_model.forward_chat_no_compress(prompt_t, answer_t).item()
+        no_merge_loss = adaptive_model.forward_chat_no_compress(
+            prompt_t, answer_t, prompt_mask=prompt_m, answer_mask=answer_m).item()
 
     with torch.no_grad():
         random_bnd = sample_random_boundaries(prompt_t, 1, max_span_len=4)
         random_loss = evaluate_boundaries_batch(adaptive_model, prompt_t, answer_t, random_bnd, 4)
         random_loss = random_loss.mean().item()
-        random_cr = 1.0 - random_bnd.float().sum(dim=-1).mean().item() / max_p
+        real_spans = (random_bnd & prompt_m.unsqueeze(0)).float().sum(dim=-1).mean().item()
+        real_tokens = prompt_m.float().sum(dim=-1).mean().item()
+        random_cr = 1.0 - real_spans / real_tokens
     random_core = random_loss / max(no_merge_loss, 1e-8)
 
     bce_results = _eval_predictor("stage2_imitation.pt", "BCE-only")
@@ -299,11 +312,11 @@ def evaluate_hybrid_fn():
         })
         # Log merge visualization tables for first 10 prompts
         import wandb as wb_mod
-        bce_p = BoundaryPredictor(embed_weight=embed_weight, hidden_dim=256, num_layers=1, num_heads=4)
+        bce_p = BoundaryPredictor(embed_weight=embed_weight, hidden_dim=512, num_layers=2, num_heads=8)
         bce_p.to(device=device)
         bce_p.load_state_dict(torch.load("/checkpoints/phase2/stage2_imitation.pt", map_location=device)["predictor_state_dict"])
         bce_p.eval()
-        grpo_p = BoundaryPredictor(embed_weight=embed_weight, hidden_dim=256, num_layers=1, num_heads=4)
+        grpo_p = BoundaryPredictor(embed_weight=embed_weight, hidden_dim=512, num_layers=2, num_heads=8)
         grpo_p.to(device=device)
         grpo_p.load_state_dict(torch.load("/checkpoints/phase2/final_predictor.pt", map_location=device)["predictor_state_dict"])
         grpo_p.eval()

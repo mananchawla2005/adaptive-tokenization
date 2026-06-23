@@ -124,7 +124,11 @@ def train_naive(
         answer_ids = batch["answer_ids"].to(device)
 
         with torch.amp.autocast("cuda" if use_amp else "cpu", dtype=amp_dtype):
-            loss = base_model.forward_chat_no_compress(prompt_ids, answer_ids)
+            loss = base_model.forward_chat_no_compress(
+                prompt_ids, answer_ids,
+                prompt_mask=batch.get("prompt_mask"),
+                answer_mask=batch.get("answer_mask"),
+            )
 
         loss = loss / grad_accum_steps
         loss.backward()
@@ -242,6 +246,8 @@ def train_adaptive(
                 tokenizer=tokenizer,
                 compression_ratio=max(current_cr, 0.001),
                 rng=rng,
+                prompt_mask=batch.get("prompt_mask"),
+                answer_mask=batch.get("answer_mask"),
             )
 
         if torch.isnan(loss) or torch.isinf(loss):

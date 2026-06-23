@@ -53,10 +53,10 @@ Figure 1: Sweep of Adaptive Compression
 
 | Metric | 96-token prompt | 384-token prompt |
 |--------|----------------|------------------|
-| Naive no-merge | 5.26 | 4.51 |
-| Adaptive no-merge | 5.35 | 4.54 |
-| **Adaptive best (with compression)** | **4.96 (cr=67%)** | **4.04 (cr=65%)** |
-| Gain vs Naive | **+5.8% better** | **+10.3% better** |
+| Naive no-merge | 5.26 | 4.49 |
+| Adaptive no-merge | 5.33 | 4.50 |
+| **Adaptive best (with compression)** | **4.92 (cr=57%)** | **3.90 (cr=61%)** |
+| Gain vs Naive | **+6.5% better** | **+13.1% better** |
 
 Key finding from this experiment was that smartly compressing the input can *beat* no compression. Compression acts as a noise filter, improving prediction signal. Green zone extends to at least 65-70%.
 
@@ -73,51 +73,49 @@ Figure 2: Architecture diagram for Adaptive Tokenization
 
 | Model | No Merge (loss/ppl/bpb) | Random Merge (loss/ppl/bpb) | CORE ↓ |
 |-------|------------------------|-----------------------------|--------|
-| **Naive** | 1.456 / 4.29 / 2.10 | 1.814 / 6.13 / 2.62 | 1.245 |
-| **Adaptive** | 1.530 / 4.62 / 2.21 | 1.630 / 5.10 / 2.35 | **1.065** |
+| **Naive** | 1.968 / 7.16 / 2.84 | 2.501 / 12.20 / 3.61 | 1.271 |
+| **Adaptive** | 2.085 / 8.05 / 3.01 | 2.195 / 8.98 / 3.17 | **1.053** |
 
-CORE = merged_loss / no_merge_loss. Lower = less degradation. Adaptive reduces compression penalty from 24.5% → 6.5%.
+CORE = merged_loss / no_merge_loss. Lower = less degradation. Adaptive reduces compression penalty from 27.1% → 5.3%.
 
 ### Pre vs Post Training of boundary predictor
 
 | Method | Compression | Loss | CORE |
 |--------|------------|------|------|
-| No-merge baseline | 0% | 1.372 | 1.000 |
-| Random merge | 9% | 1.386 | 1.010 |
-| **BCE-only (imitation)** | **60%** | **1.422** | **1.036** |
-| **BCE + GRPO (hybrid)** | **66%** | **1.360** | **0.991** |
+| No-merge baseline | 0% | 2.288 | 1.000 |
+| Random merge | 19% | 3.461 | 1.513 |
+| **BCE-only (imitation)** | **35%** | **2.508** | **1.096** |
+| **BCE + GRPO (hybrid)** | **37%** | **2.366** | **1.034** |
 
-**CORE < 1.0** - The GRPO fine-tuned predictor achieves *better* quality than no compression while using 66% fewer prompt tokens. Compression improves predictions.
-
-**BCE-only vs GRPO**: BCE alone is CORE=1.036 (worse than no-merge). GRPO flips it to CORE=0.991. The predictor learns to be more aggressive (60% → 66% cr) while also improving quality.
+**CORE=1.034** — GRPO improves over BCE (1.096 → 1.034) and closes most of the gap to no-merge. Oracle analysis confirms CORE=0.951 is achievable at 50% compression, leaving headroom. Predictor: 512-dim, 2 layer, 8 head (~4M params). Reward uses fixed loss ceiling at no-merge baseline to prevent reward hacking.
 
 ## What Merging Looks Like
 
-Each block is a **merged span** and everything inside one block gets packed into a single embedding.
+Each block is a **merged span** and everything inside one block gets packed into a single embedding. GRPO keeps compression more or less equal to BCE though reduces downstream loss.
 
-**Example 1** — *"force of attraction"* (cr=39% vs 75%):
+**Example 1** — *"force of attraction"* (cr=34% for both):
 
-> <span style="background:#ffcccb;color:#000;padding:1px 3px">Q</span>|<span style="background:#cce5ff;color:#000;padding:1px 3px">: What is</span>|<span style="background:#ffcccb;color:#000;padding:1px 3px"> the</span>|<span style="background:#cce5ff;color:#000;padding:1px 3px"> force</span>|<span style="background:#ffcccb;color:#000;padding:1px 3px"> of</span>|<span style="background:#cce5ff;color:#000;padding:1px 3px"> attraction</span>|<span style="background:#ffcccb;color:#000;padding:1px 3px"> that</span>|<span style="background:#cce5ff;color:#000;padding:1px 3px"> holds together positive and</span>|<span style="background:#ffcccb;color:#000;padding:1px 3px"> negative</span>|<span style="background:#cce5ff;color:#000;padding:1px 3px"> ions</span>|<span style="background:#ffcccb;color:#000;padding:1px 3px">?</span>
-> `BCE-only` - nearly word-by-word (34 total spans)
+> <span style="background:#ffcccb;color:#000;padding:1px 3px">Q</span>|<span style="background:#cce5ff;color:#000;padding:1px 3px">: What</span>|<span style="background:#ffcccb;color:#000;padding:1px 3px"> is</span>|<span style="background:#cce5ff;color:#000;padding:1px 3px"> the</span>|<span style="background:#ffcccb;color:#000;padding:1px 3px"> force</span>|<span style="background:#cce5ff;color:#000;padding:1px 3px"> of</span>|<span style="background:#ffcccb;color:#000;padding:1px 3px"> attraction</span>
+> `BCE-only` — word-by-word (37 total spans)
 
-> <span style="background:#ffcccb;color:#000;padding:1px 3px">Q: What is</span>|<span style="background:#cce5ff;color:#000;padding:1px 3px"> the force of attraction</span>|<span style="background:#ffcccb;color:#000;padding:1px 3px"> that holds together positive</span>|<span style="background:#cce5ff;color:#000;padding:1px 3px"> and negative ions</span>|<span style="background:#ffcccb;color:#000;padding:1px 3px">?</span>
-> `BCE+GRPO` - coherent phrases (14 total spans)
+> <span style="background:#ffcccb;color:#000;padding:1px 3px">Q:</span>|<span style="background:#cce5ff;color:#000;padding:1px 3px"> What is the force</span>|<span style="background:#ffcccb;color:#000;padding:1px 3px"> of</span>|<span style="background:#cce5ff;color:#000;padding:1px 3px"> attraction that</span>|<span style="background:#ffcccb;color:#000;padding:1px 3px"> holds</span>|<span style="background:#cce5ff;color:#000;padding:1px 3px"> together</span>
+> `BCE+GRPO` — "What is the force" as one phrase (37 total spans)
 
-**Example 2** — *"Tower of London / Richard II"* (cr=45% vs 74%):
+**Example 2** — *"Tower of London / Richard II"* (cr=32% vs 31%):
 
-> <span style="background:#ffcccb;color:#000;padding:1px 3px">Q:Found the</span>|<span style="background:#cce5ff;color:#000;padding:1px 3px"> following article online</span>|<span style="background:#ffcccb;color:#000;padding:1px 3px">, use</span>|<span style="background:#cce5ff;color:#000;padding:1px 3px"> it</span>|<span style="background:#ffcccb;color:#000;padding:1px 3px"> to</span>|<span style="background:#cce5ff;color:#000;padding:1px 3px"> answer</span>|<span style="background:#ffcccb;color:#000;padding:1px 3px"> the</span>|<span style="background:#cce5ff;color:#000;padding:1px 3px"> question</span>|<span style="background:#ffcccb;color:#000;padding:1px 3px">: What was</span>|<span style="background:#cce5ff;color:#000;padding:1px 3px"> the full name</span>|<span style="background:#ffcccb;color:#000;padding:1px 3px"> of the location</span>|<span style="background:#cce5ff;color:#000;padding:1px 3px"> where Richard II</span>|<span style="background:#ffcccb;color:#000;padding:1px 3px"> began his procession?</span>
-> `BCE-only` - splinters into tiny pieces (211 total spans)
+> <span style="background:#ffcccb;color:#000;padding:1px 3px">Q</span>|<span style="background:#cce5ff;color:#000;padding:1px 3px">:</span>|<span style="background:#ffcccb;color:#000;padding:1px 3px"> Found the</span>|<span style="background:#cce5ff;color:#000;padding:1px 3px"> following</span>|<span style="background:#ffcccb;color:#000;padding:1px 3px"> article online</span>|<span style="background:#cce5ff;color:#000;padding:1px 3px">,</span>|<span style="background:#ffcccb;color:#000;padding:1px 3px"> use</span>|<span style="background:#cce5ff;color:#000;padding:1px 3px"> it</span>|<span style="background:#ffcccb;color:#000;padding:1px 3px"> to</span>|<span style="background:#cce5ff;color:#000;padding:1px 3px"> answer</span>|<span style="background:#ffcccb;color:#000;padding:1px 3px"> the</span>
+> `BCE-only` — fragments into pieces (262 total spans)
 
-> <span style="background:#ffcccb;color:#000;padding:1px 3px">Q:Found the following article</span>|<span style="background:#cce5ff;color:#000;padding:1px 3px">, use it to answer the question</span>|<span style="background:#ffcccb;color:#000;padding:1px 3px">: What was the full name of the</span>|<span style="background:#cce5ff;color:#000;padding:1px 3px"> location where Richard II began his procession?</span>
-> `BCE+GRPO` - merges into meaningful chunks (99 total spans)
+> <span style="background:#ffcccb;color:#000;padding:1px 3px">Q:</span>|<span style="background:#cce5ff;color:#000;padding:1px 3px"> Found the</span>|<span style="background:#ffcccb;color:#000;padding:1px 3px"> following article</span>|<span style="background:#cce5ff;color:#000;padding:1px 3px"> online, use it</span>|<span style="background:#ffcccb;color:#000;padding:1px 3px"> to answer the question</span>|<span style="background:#cce5ff;color:#000;padding:1px 3px">:</span>
+> `BCE+GRPO` — "to answer the question" as one span (266 total spans)
 
-**Example 3** — *"National Hockey League"* (cr=48% vs 74%):
+**Example 3** — *"National Hockey League"* (cr=35% vs 33%):
 
-> <span style="background:#ffcccb;color:#000;padding:1px 3px">Please answer the following</span>|<span style="background:#cce5ff;color:#000;padding:1px 3px"> question: Information:</span>|<span style="background:#ffcccb;color:#000;padding:1px 3px"> - The National</span>|<span style="background:#cce5ff;color:#000;padding:1px 3px"> Hockey</span>|<span style="background:#ffcccb;color:#000;padding:1px 3px"> League</span>|<span style="background:#cce5ff;color:#000;padding:1px 3px"> (NHL)</span>|<span style="background:#ffcccb;color:#000;padding:1px 3px"> is a professional ice hockey league</span>|<span style="background:#cce5ff;color:#000;padding:1px 3px"> currently composed of 31 member clubs.</span>
-> `BCE-only` - breaks "Hockey" and "League" apart (201 total spans)
+> <span style="background:#ffcccb;color:#000;padding:1px 3px">Please</span>|<span style="background:#cce5ff;color:#000;padding:1px 3px"> answer</span>|<span style="background:#ffcccb;color:#000;padding:1px 3px"> the following</span>|<span style="background:#cce5ff;color:#000;padding:1px 3px"> question:</span>|<span style="background:#ffcccb;color:#000;padding:1px 3px"> Information:</span>|<span style="background:#cce5ff;color:#000;padding:1px 3px"> - The</span>|<span style="background:#ffcccb;color:#000;padding:1px 3px"> National</span>
+> `BCE-only` — breaks "Please answer" apart (249 total spans)
 
-> <span style="background:#ffcccb;color:#000;padding:1px 3px">Please answer the following question:</span>|<span style="background:#cce5ff;color:#000;padding:1px 3px"> Information: - The National Hockey League (NHL)</span>|<span style="background:#ffcccb;color:#000;padding:1px 3px"> is a professional ice hockey league</span>|<span style="background:#cce5ff;color:#000;padding:1px 3px"> currently composed of 31 member clubs.</span>
-> `BCE+GRPO` - keeps "National Hockey League (NHL)" together (101 total spans)
+> <span style="background:#ffcccb;color:#000;padding:1px 3px">Please answer the</span>|<span style="background:#cce5ff;color:#000;padding:1px 3px"> following question:</span>|<span style="background:#ffcccb;color:#000;padding:1px 3px"> Information:</span>|<span style="background:#cce5ff;color:#000;padding:1px 3px"> - The</span>|<span style="background:#ffcccb;color:#000;padding:1px 3px"> National</span>|<span style="background:#cce5ff;color:#000;padding:1px 3px"> Hockey</span>
+> `BCE+GRPO` — "Please answer the" as one block (259 total spans)
 
 ## Reproduction
 
@@ -135,9 +133,12 @@ modal run --detach phase2_app.py::evaluate_hybrid_fn
 
 ## Next Steps
 
+- Do a hyperparameter search to find the minimum possible boundary predictor with maximum compression
 - Ablation of architecture of span encoder and keeping additional parameter size negligible compared to the base model
 - Running FLOP controlled inference tests to find the true speedup.
 - Scaling it to more tokens during the post training and also trying the same strategy on an already sharpened (post trained) model.
 - Training the boundary predictor most extensively to handle out of domain tasks during test time and evaluating cross domain generalisation.
+- Try with more group size to move towards oracle optimal compression.
+- Try with alternate phase 1 and phase 2 repeatedly to converge to an optimal system.
 
 **We have also open sourced our wandb logs and checkpoints artifacts for reproducibility. Further experiments will be added to the same links. All experiments are tracked by timestamp and commit ids.**

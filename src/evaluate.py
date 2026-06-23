@@ -44,7 +44,11 @@ def evaluate_model(
 
             with torch.amp.autocast("cuda" if use_amp else "cpu", dtype=amp_dtype):
                 if scenario == "no_merge":
-                    loss = model.forward_chat_no_compress(prompt_ids, answer_ids)
+                    loss = model.forward_chat_no_compress(
+                        prompt_ids, answer_ids,
+                        prompt_mask=batch.get("prompt_mask"),
+                        answer_mask=batch.get("answer_mask"),
+                    )
                 elif scenario == "random_merge":
                     rng = random.Random(batch_idx)
                     loss = model.forward_chat(
@@ -52,6 +56,8 @@ def evaluate_model(
                         tokenizer=tokenizer,
                         compression_ratio=0.5,
                         rng=rng,
+                        prompt_mask=batch.get("prompt_mask"),
+                        answer_mask=batch.get("answer_mask"),
                     )
                 else:
                     raise ValueError(f"Unknown scenario: {scenario}")
@@ -59,7 +65,11 @@ def evaluate_model(
             if torch.isnan(loss) or torch.isinf(loss):
                 continue
 
-            num_tokens = (answer_ids != 0).sum().item()
+            am = batch.get("answer_mask")
+            if am is not None:
+                num_tokens = am.sum().item()
+            else:
+                num_tokens = (answer_ids != 0).sum().item()
             total_loss += loss.item() * num_tokens
             total_tokens += num_tokens
 
