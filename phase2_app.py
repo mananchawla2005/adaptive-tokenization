@@ -187,8 +187,9 @@ def evaluate_hybrid_fn():
 
     embed_weight = adaptive_model.transformer.wte.weight.detach()
 
-    # Load evaluation prompts
+    # Load evaluation prompts from held-out shard (skip first 1M training examples)
     ds = load_dataset("Open-Orca/OpenOrca", split="train", streaming=True)
+    ds = ds.skip(1_000_000)  # fix #3: val split via deterministic skip
     ds = ds.shuffle(seed=EXPERIMENT_SEED)
     prompts, answers = [], []
     for ex in ds:

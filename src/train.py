@@ -259,44 +259,6 @@ def train_adaptive(
                 answer_mask=am.to(device) if am is not None else None,
             )
 
-    start_step = 0
-    if volume is not None:
-        ckpt_path = os.path.join(checkpoint_dir, "latest.pt")
-        if os.path.exists(ckpt_path):
-            print("Resuming from checkpoint...")
-            checkpoint = torch.load(ckpt_path, map_location=device)
-            base_model.load_state_dict(checkpoint["model_state_dict"])
-            optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-            start_step = checkpoint["step"]
-            volume.reload()
-
-    base_model.train()
-    accumulated_loss = 0.0
-    step = start_step
-    pbar = tqdm(total=total_steps, initial=start_step, desc="Adaptive training")
-    optimizer.zero_grad()
-
-    for batch_idx, batch in enumerate(dataloader):
-        if step >= total_steps:
-            break
-
-        progress = step / max(total_steps, 1)
-        current_cr = _compression_schedule(progress, max_compression_ratio)
-
-        prompt_ids = batch["prompt_ids"].to(device)
-        answer_ids = batch["answer_ids"].to(device)
-
-        rng = random.Random(step * batch_idx)
-        with torch.amp.autocast("cuda" if use_amp else "cpu", dtype=amp_dtype):
-            loss = base_model.forward_chat(
-                prompt_ids, answer_ids,
-                tokenizer=tokenizer,
-                compression_ratio=max(current_cr, 0.001),
-                rng=rng,
-                prompt_mask=batch.get("prompt_mask"),
-                answer_mask=batch.get("answer_mask"),
-            )
-
         if torch.isnan(loss) or torch.isinf(loss):
             print(f"WARNING: NaN/Inf loss at step {step}, skipping batch")
             optimizer.zero_grad()

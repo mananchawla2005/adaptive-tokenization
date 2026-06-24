@@ -45,6 +45,8 @@ We decided to use the concept behind this and apply it to this project. The init
 
 The post training and evaluation is done on ORCA dataset with 98M tokens during the training phase.
 
+**Note on training scope**: Phase 1 updates all model parameters (124M GPT-2 weights + 7M SpanEncoder). This is full-model fine-tuning with a span-encoder retrofit, not span-encoder-only adaptation. Both V1 and V2 receive identical optimizer steps and token budgets for fair comparison.
+
 - Now that the model is better with compressed embeddings, we need to train a boundary predictor to select the best boundaries which keeps loss as close as to the base model as possible. However before that, we ran a quick sweep across compression levels and loss values and two different sequence lengths. To our surprise when plotted the average loss, we can see that at an optimal compression, the model has capacity to outperform its naive counterpart.
 
 ![](oracle_dual.png)

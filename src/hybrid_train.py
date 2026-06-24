@@ -100,7 +100,9 @@ def evaluate_boundaries_batch(adaptive_model, prompt_ids, answer_ids, all_bounda
     return torch.tensor(all_losses, device=device)
 
 
-def sample_random_boundaries(prompt_ids, num_samples, max_span_len=4):
+def sample_random_boundaries(prompt_ids, num_samples, max_span_len=4, prompt_mask=None):
+    """Sample random span boundaries. If prompt_mask is provided, only span real tokens;
+    padding positions always merge (no boundaries in padding)."""
     B, L = prompt_ids.shape
     device = prompt_ids.device
     boundaries = torch.zeros(num_samples, B, L, dtype=torch.bool, device=device)
@@ -108,15 +110,16 @@ def sample_random_boundaries(prompt_ids, num_samples, max_span_len=4):
     for k in range(num_samples):
         target_cr = random.random() * 0.75
         for b in range(B):
+            real_len = int(prompt_mask[b].sum().item()) if prompt_mask is not None else L
             pos = 0; sid = 0
-            while pos < L:
+            while pos < real_len:
                 if sid > 0:
-                    cur_cr = 1.0 - (sid + (L - pos)) / L
+                    cur_cr = 1.0 - (sid + (real_len - pos)) / real_len
                     if cur_cr >= target_cr:
                         boundaries[k, b, pos] = True
                         pos += 1; sid += 1
                         continue
-                remaining = L - pos
+                remaining = real_len - pos
                 slen = random.randint(1, min(max_span_len, remaining))
                 slen = min(slen, remaining)
                 boundaries[k, b, pos] = True
@@ -152,10 +155,12 @@ def stage1_create_oracle(
 
         prompt_ids = batch["prompt_ids"].to(device)
         answer_ids = batch["answer_ids"].to(device)
+        pm = batch.get("prompt_mask")
         am = batch.get("answer_mask")
         B, L = prompt_ids.shape
 
-        boundaries = sample_random_boundaries(prompt_ids, k_samples, max_span_len=4)
+        boundaries = sample_random_boundaries(prompt_ids, k_samples, max_span_len=4,
+                                              prompt_mask=pm.to(device) if pm is not None else None)
 
         with torch.no_grad():
             losses_raw = evaluate_boundaries_batch(
