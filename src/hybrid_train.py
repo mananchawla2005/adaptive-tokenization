@@ -353,10 +353,9 @@ def stage3_train_grpo(
         am = batch.get("answer_mask")
         B, Pl = prompt_ids.shape
 
-        boundaries, log_probs_per = sample_boundaries_grpo(
+        boundaries = sample_boundaries_grpo(
             predictor, prompt_ids, attention_mask=prompt_mask,
             num_samples=NUM_SAMPLES_PER_PROMPT, max_span_len=4,
-            return_log_probs=True,  # fix #7: on-policy log-probs from biased sampling
         )
 
         with torch.no_grad():
@@ -376,6 +375,12 @@ def stage3_train_grpo(
         mean_r = rewards.mean(dim=0, keepdim=True)
         std_r = rewards.std(dim=0, keepdim=True) + 1e-8
         advantages = (rewards - mean_r) / std_r
+
+        # Compute on-policy log-probs WITH gradient tracking (outside no_grad)
+        from .boundary_sampling import compute_grpo_log_probs
+        log_probs_per = compute_grpo_log_probs(
+            predictor, prompt_ids, boundaries, attention_mask=prompt_mask,
+        )
 
         policy_loss = -(log_probs_per.flatten() * advantages.flatten()).mean()
 
