@@ -67,8 +67,12 @@ def sample_boundaries_grpo(predictor, input_ids, attention_mask=None, num_sample
             )
 
             if return_log_probs:
+                # Forced boundaries (is_forced=True) are deterministic — exclude from log-prob
+                forced_mask = ~is_forced
                 sample_log_probs[k, :, pos] = torch.where(
-                    new_span, log_p_bound[:, pos], log_p_merge[:, pos]
+                    new_span & forced_mask, log_p_bound[:, pos],
+                    torch.where((~new_span) & forced_mask, log_p_merge[:, pos],
+                                torch.zeros_like(log_p_bound[:, pos]))
                 )
 
     if return_log_probs:

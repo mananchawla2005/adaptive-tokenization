@@ -105,6 +105,15 @@ def train_naive(
         learning_rate=learning_rate, warmup_steps=warmup_steps, total_steps=total_steps,
     )
 
+    train_config = {
+        "model": model_name, "variant": "naive",
+        "batch_size": batch_size, "grad_accum_steps": grad_accum_steps,
+        "learning_rate": learning_rate, "warmup_steps": warmup_steps,
+        "max_steps": max_steps, "total_tokens": total_tokens,
+        "max_prompt": MAX_PROMPT, "max_answer": MAX_ANSWER,
+        "seed": 42,
+    }
+
     start_step = 0
     if volume is not None:
         ckpt_path = os.path.join(checkpoint_dir, "latest.pt")
@@ -113,6 +122,8 @@ def train_naive(
             checkpoint = torch.load(ckpt_path, map_location=device)
             base_model.load_state_dict(checkpoint["model_state_dict"])
             optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+            if "scheduler_state_dict" in checkpoint:
+                scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
             start_step = checkpoint["step"]
             volume.reload()
 
@@ -165,10 +176,10 @@ def train_naive(
             accumulated_loss = 0.0
 
             if step % 1000 == 0 and volume is not None:
-                _save_checkpoint(base_model, optimizer, scheduler, step, checkpoint_dir, volume)
+                _save_checkpoint(base_model, optimizer, scheduler, step, checkpoint_dir, volume, config=train_config)
 
     if volume is not None:
-        _save_checkpoint(base_model, optimizer, scheduler, step, checkpoint_dir, volume, final=True)
+        _save_checkpoint(base_model, optimizer, scheduler, step, checkpoint_dir, volume, final=True, config=train_config)
 
     pbar.close()
 
@@ -219,6 +230,16 @@ def train_adaptive(
         learning_rate=learning_rate, warmup_steps=warmup_steps, total_steps=total_steps,
     )
 
+    train_config = {
+        "model": model_name, "variant": "adaptive",
+        "batch_size": batch_size, "grad_accum_steps": grad_accum_steps,
+        "learning_rate": learning_rate, "warmup_steps": warmup_steps,
+        "max_steps": max_steps, "total_tokens": total_tokens,
+        "max_compression_ratio": max_compression_ratio, "max_span_len": max_span_len,
+        "max_prompt": MAX_PROMPT, "max_answer": MAX_ANSWER,
+        "seed": 42,
+    }
+
     start_step = 0
     if volume is not None:
         ckpt_path = os.path.join(checkpoint_dir, "latest.pt")
@@ -227,6 +248,8 @@ def train_adaptive(
             checkpoint = torch.load(ckpt_path, map_location=device)
             base_model.load_state_dict(checkpoint["model_state_dict"])
             optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+            if "scheduler_state_dict" in checkpoint:
+                scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
             start_step = checkpoint["step"]
             volume.reload()
 
@@ -306,10 +329,10 @@ def train_adaptive(
             accumulated_loss = 0.0
 
             if step % 1000 == 0 and volume is not None:
-                _save_checkpoint(base_model, optimizer, scheduler, step, checkpoint_dir, volume)
+                _save_checkpoint(base_model, optimizer, scheduler, step, checkpoint_dir, volume, config=train_config)
 
     if volume is not None:
-        _save_checkpoint(base_model, optimizer, scheduler, step, checkpoint_dir, volume, final=True)
+        _save_checkpoint(base_model, optimizer, scheduler, step, checkpoint_dir, volume, final=True, config=train_config)
 
     pbar.close()
 
