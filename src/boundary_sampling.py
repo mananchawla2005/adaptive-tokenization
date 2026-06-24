@@ -7,7 +7,12 @@ def get_predictor_logits(predictor, input_ids, attention_mask=None):
 
 
 @torch.no_grad()
-def sample_boundaries_grpo(predictor, input_ids, attention_mask=None, num_samples=4, max_span_len=4, epsilon=0.05):
+def sample_boundaries_grpo(predictor, input_ids, attention_mask=None, num_samples=4, max_span_len=4, epsilon=0.0, return_log_probs=False):
+    """Sample boundary configurations from predictor.
+
+    Fix #7: When return_log_probs=True, returns log_probs computed from the SAME
+    biased/perturbed distribution used for sampling, ensuring on-policy GRPO.
+    """
     B, L = input_ids.shape
     device = input_ids.device
 
@@ -19,6 +24,7 @@ def sample_boundaries_grpo(predictor, input_ids, attention_mask=None, num_sample
         biases = torch.tensor([-0.5, -0.15, 0.15, 0.5], device=device)
 
     boundaries = torch.zeros(num_samples, B, L, dtype=torch.bool, device=device)
+    sample_log_probs = torch.zeros(num_samples, B, L, device=device) if return_log_probs else None
 
     for k in range(min(num_samples, len(biases))):
         bias = biases[k]
@@ -30,8 +36,13 @@ def sample_boundaries_grpo(predictor, input_ids, attention_mask=None, num_sample
             p_boundary = torch.where(noise_mask, torch.full_like(p_boundary, 0.5), p_boundary)
 
         if attention_mask is not None:
-            p_boundary = p_boundary * attention_mask.float()  # padding → 0 → always merge
+            p_boundary = p_boundary * attention_mask.float()  # padding -> 0 -> always merge
         p_boundary[:, 0] = 1.0
+
+        # Track log-probs of sampled actions (on-policy with biased/noised probs)
+        if return_log_probs:
+            log_p_bound = torch.log(p_boundary.clamp_min(1e-8))
+            log_p_merge = torch.log((1.0 - p_boundary).clamp_min(1e-8))
 
         merged_count = torch.zeros(B, L, dtype=torch.long, device=device)
 
@@ -55,10 +66,29 @@ def sample_boundaries_grpo(predictor, input_ids, attention_mask=None, num_sample
                 merged_count[:, pos - 1] + 1,
             )
 
+            if return_log_probs:
+                sample_log_probs[k, :, pos] = torch.where(
+                    new_span, log_p_bound[:, pos], log_p_merge[:, pos]
+                )
+
+    if return_log_probs:
+        # Mask and normalize log-probs (same as boundaries_to_log_probs logic)
+        if attention_mask is not None:
+            mask = attention_mask.float()
+            mask[:, 0] = 0.0  # exclude forced first boundary
+            sample_log_probs = sample_log_probs * mask.unsqueeze(0)
+            norm = mask.sum(dim=-1).clamp_min(1).unsqueeze(0)
+        else:
+            norm = L
+        return boundaries, sample_log_probs.sum(dim=-1) / norm
+
     return boundaries
 
 
 def boundaries_to_log_probs(predictor, input_ids, boundaries, attention_mask=None):
+    """Compute log-probs of given boundaries under the UNBIASED predictor.
+    This is used for inference/eval, not for GRPO training.
+    """
     S, B, L = boundaries.shape
     device = input_ids.device
 

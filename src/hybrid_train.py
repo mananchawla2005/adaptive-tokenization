@@ -152,6 +152,7 @@ def stage1_create_oracle(
 
         prompt_ids = batch["prompt_ids"].to(device)
         answer_ids = batch["answer_ids"].to(device)
+        am = batch.get("answer_mask")
         B, L = prompt_ids.shape
 
         boundaries = sample_random_boundaries(prompt_ids, k_samples, max_span_len=4)
@@ -159,7 +160,7 @@ def stage1_create_oracle(
         with torch.no_grad():
             losses_raw = evaluate_boundaries_batch(
                 adaptive_model, prompt_ids, answer_ids, boundaries, max_span_len=4,
-                answer_mask=batch.get("answer_mask"),
+                answer_mask=am.to(device) if am is not None else None,
             )
 
         losses_t = losses_raw.t().contiguous()
@@ -202,6 +203,7 @@ def stage1_create_oracle(
     prompts_t = torch.full((len(all_prompt_ids), max_p), 0, dtype=torch.long)
     answers_t = torch.full((len(all_answer_ids), max_a), 0, dtype=torch.long)
     boundaries_t = torch.zeros(len(all_best_boundaries), max_p, dtype=torch.bool)
+    prompt_masks_t = torch.zeros(len(all_prompt_ids), max_p, dtype=torch.bool)
 
     for i in range(len(all_prompt_ids)):
         pl = all_prompt_ids[i].shape[0]
@@ -209,6 +211,7 @@ def stage1_create_oracle(
         prompts_t[i, :pl] = all_prompt_ids[i]
         answers_t[i, :al] = all_answer_ids[i]
         boundaries_t[i, :all_best_boundaries[i].shape[0]] = all_best_boundaries[i]
+        prompt_masks_t[i, :pl] = True
 
     if volume is not None:
         os.makedirs(output_dir, exist_ok=True)
@@ -216,6 +219,7 @@ def stage1_create_oracle(
             "prompts": prompts_t,
             "answers": answers_t,
             "boundaries": boundaries_t,
+            "prompt_masks": prompt_masks_t,  # fix #2: exclude padding from BCE
         }, os.path.join(output_dir, "oracle_dataset.pt"))
         volume.commit()
         print(f"Saved oracle dataset: {len(all_prompt_ids)} examples")
@@ -252,11 +256,13 @@ def stage2_train_imitation(
     data = torch.load(oracle_path, map_location="cpu")
     prompts_t = data["prompts"]
     boundaries_t = data["boundaries"].float()
+    # fix #2: use prompt_masks to exclude padding from BCE loss
+    prompt_masks_t = data.get("prompt_masks", torch.ones_like(boundaries_t)).float()
 
     predictor = BoundaryPredictor(embed_weight=embed_weight, hidden_dim=512, num_layers=2, num_heads=8)
     predictor.to(device)
 
-    dataset = TensorDataset(prompts_t, boundaries_t)
+    dataset = TensorDataset(prompts_t, boundaries_t, prompt_masks_t)
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
     optimizer = AdamW(predictor.parameters(), lr=3e-4, weight_decay=0.01)
@@ -267,12 +273,14 @@ def stage2_train_imitation(
         total_loss = 0.0
         pbar = tqdm(loader, desc=f"Stage 2: BCE epoch {epoch+1}/{epochs}")
 
-        for prompt_batch, bnd_batch in pbar:
+        for prompt_batch, bnd_batch, mask_batch in pbar:
             prompt_batch = prompt_batch.to(device)
             bnd_batch = bnd_batch.to(device)
+            mask_batch = mask_batch.to(device)
 
             logits = predictor.forward(prompt_batch)
-            bce_loss = F.binary_cross_entropy_with_logits(logits, bnd_batch)
+            bce_per_token = F.binary_cross_entropy_with_logits(logits, bnd_batch, reduction="none")
+            bce_loss = (bce_per_token * mask_batch).sum() / mask_batch.sum().clamp_min(1)
 
             optimizer.zero_grad()
             bce_loss.backward()
@@ -337,17 +345,19 @@ def stage3_train_grpo(
         prompt_ids = batch["prompt_ids"].to(device)
         answer_ids = batch["answer_ids"].to(device)
         prompt_mask = batch["prompt_mask"].to(device)
+        am = batch.get("answer_mask")
         B, Pl = prompt_ids.shape
 
-        boundaries = sample_boundaries_grpo(
+        boundaries, log_probs_per = sample_boundaries_grpo(
             predictor, prompt_ids, attention_mask=prompt_mask,
             num_samples=NUM_SAMPLES_PER_PROMPT, max_span_len=4,
+            return_log_probs=True,  # fix #7: on-policy log-probs from biased sampling
         )
 
         with torch.no_grad():
             losses_raw = evaluate_boundaries_batch(
                 adaptive_model, prompt_ids, answer_ids, boundaries, max_span_len=4,
-                answer_mask=batch.get("answer_mask"),
+                answer_mask=am.to(device) if am is not None else None,
             )
         losses_t = losses_raw.t().contiguous().to(device)
 
@@ -361,10 +371,6 @@ def stage3_train_grpo(
         mean_r = rewards.mean(dim=0, keepdim=True)
         std_r = rewards.std(dim=0, keepdim=True) + 1e-8
         advantages = (rewards - mean_r) / std_r
-
-        log_probs_per = boundaries_to_log_probs(
-            predictor, prompt_ids, boundaries, attention_mask=prompt_mask,
-        )
 
         policy_loss = -(log_probs_per.flatten() * advantages.flatten()).mean()
 

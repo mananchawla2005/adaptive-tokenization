@@ -38,6 +38,9 @@ def _setup_model_and_optimizer(
     warmup_steps=500,
     total_steps=6103,
 ):
+    # fix #10: Phase 1 trains ALL parameters (GPT-2 weights + SpanEncoder).
+    # This is full-model fine-tuning with a span-encoder retrofit, not
+    # span-encoder-only adaptation. Documented in README.
     model = AdaptiveGPT2Model(base_model_name=model_name, max_span_len=max_span_len)
     model = model.to(dtype=torch.bfloat16, device=device)
 
@@ -48,13 +51,16 @@ def _setup_model_and_optimizer(
     return model, optimizer, scheduler
 
 
-def _save_checkpoint(model, optimizer, step, checkpoint_dir, volume, final=False):
+def _save_checkpoint(model, optimizer, scheduler, step, checkpoint_dir, volume, final=False, config=None):
     os.makedirs(checkpoint_dir, exist_ok=True)
     state_dict = {
         "step": step,
         "model_state_dict": model.state_dict(),
         "optimizer_state_dict": optimizer.state_dict(),
+        "scheduler_state_dict": scheduler.state_dict(),
     }
+    if config is not None:
+        state_dict["config"] = config
     torch.save(state_dict, os.path.join(checkpoint_dir, "latest.pt"))
     if final:
         torch.save(state_dict, os.path.join(checkpoint_dir, "final.pt"))
@@ -84,15 +90,15 @@ def train_naive(
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     tokenizer.pad_token = tokenizer.eos_token
 
-    tokens_per_step = batch_size * (MAX_PROMPT + MAX_ANSWER)
+    tokens_per_step = batch_size * grad_accum_steps * (MAX_PROMPT + MAX_ANSWER)
     total_steps = total_tokens // tokens_per_step
     if max_steps is not None:
         total_steps = min(total_steps, max_steps)
 
     dataloader = create_dataloader(tokenizer, batch_size=batch_size, max_tokens=total_tokens)
 
-    print(f"Total training steps: {total_steps}")
-    print(f"Batch size: {batch_size}, Prompt max: {MAX_PROMPT}, Answer max: {MAX_ANSWER}")
+    print(f"Total training steps: {total_steps} (tokens per step: {tokens_per_step})")
+    print(f"Batch size: {batch_size} x {grad_accum_steps} grad accum, Prompt: {MAX_PROMPT}, Answer: {MAX_ANSWER}")
 
     base_model, optimizer, scheduler = _setup_model_and_optimizer(
         model_name, device,
@@ -122,12 +128,14 @@ def train_naive(
 
         prompt_ids = batch["prompt_ids"].to(device)
         answer_ids = batch["answer_ids"].to(device)
+        pm = batch.get("prompt_mask")
+        am = batch.get("answer_mask")
 
         with torch.amp.autocast("cuda" if use_amp else "cpu", dtype=amp_dtype):
             loss = base_model.forward_chat_no_compress(
                 prompt_ids, answer_ids,
-                prompt_mask=batch.get("prompt_mask"),
-                answer_mask=batch.get("answer_mask"),
+                prompt_mask=pm.to(device) if pm is not None else None,
+                answer_mask=am.to(device) if am is not None else None,
             )
 
         loss = loss / grad_accum_steps
@@ -157,10 +165,10 @@ def train_naive(
             accumulated_loss = 0.0
 
             if step % 1000 == 0 and volume is not None:
-                _save_checkpoint(base_model, optimizer, step, checkpoint_dir, volume)
+                _save_checkpoint(base_model, optimizer, scheduler, step, checkpoint_dir, volume)
 
     if volume is not None:
-        _save_checkpoint(base_model, optimizer, step, checkpoint_dir, volume, final=True)
+        _save_checkpoint(base_model, optimizer, scheduler, step, checkpoint_dir, volume, final=True)
 
     pbar.close()
 
@@ -195,22 +203,61 @@ def train_adaptive(
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     tokenizer.pad_token = tokenizer.eos_token
 
-    tokens_per_step = batch_size * (MAX_PROMPT + MAX_ANSWER)
+    tokens_per_step = batch_size * grad_accum_steps * (MAX_PROMPT + MAX_ANSWER)
     total_steps = total_tokens // tokens_per_step
     if max_steps is not None:
         total_steps = min(total_steps, max_steps)
 
     dataloader = create_dataloader(tokenizer, batch_size=batch_size, max_tokens=total_tokens)
 
-    print(f"Total training steps: {total_steps}")
-    print(f"Batch size: {batch_size}, Prompt max: {MAX_PROMPT}, Answer max: {MAX_ANSWER}")
+    print(f"Total training steps: {total_steps} (tokens per step: {tokens_per_step})")
+    print(f"Batch size: {batch_size} x {grad_accum_steps} grad accum, Prompt: {MAX_PROMPT}, Answer: {MAX_ANSWER}")
     print(f"Max compression ratio: {max_compression_ratio}")
-    print(f"Schedule: 0% for first 10%, cosine ramp to {max_compression_ratio} over 10-90%, then constant")
 
     base_model, optimizer, scheduler = _setup_model_and_optimizer(
         model_name, device, max_span_len=max_span_len,
         learning_rate=learning_rate, warmup_steps=warmup_steps, total_steps=total_steps,
     )
+
+    start_step = 0
+    if volume is not None:
+        ckpt_path = os.path.join(checkpoint_dir, "latest.pt")
+        if os.path.exists(ckpt_path):
+            print("Resuming from checkpoint...")
+            checkpoint = torch.load(ckpt_path, map_location=device)
+            base_model.load_state_dict(checkpoint["model_state_dict"])
+            optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+            start_step = checkpoint["step"]
+            volume.reload()
+
+    base_model.train()
+    accumulated_loss = 0.0
+    step = start_step
+    pbar = tqdm(total=total_steps, initial=start_step, desc="Adaptive training")
+    optimizer.zero_grad()
+
+    for batch_idx, batch in enumerate(dataloader):
+        if step >= total_steps:
+            break
+
+        progress = step / max(total_steps, 1)
+        current_cr = _compression_schedule(progress, max_compression_ratio)
+
+        prompt_ids = batch["prompt_ids"].to(device)
+        answer_ids = batch["answer_ids"].to(device)
+        pm = batch.get("prompt_mask")
+        am = batch.get("answer_mask")
+
+        rng = random.Random(step * batch_idx)
+        with torch.amp.autocast("cuda" if use_amp else "cpu", dtype=amp_dtype):
+            loss = base_model.forward_chat(
+                prompt_ids, answer_ids,
+                tokenizer=tokenizer,
+                compression_ratio=max(current_cr, 0.001),
+                rng=rng,
+                prompt_mask=pm.to(device) if pm is not None else None,
+                answer_mask=am.to(device) if am is not None else None,
+            )
 
     start_step = 0
     if volume is not None:
@@ -297,10 +344,10 @@ def train_adaptive(
             accumulated_loss = 0.0
 
             if step % 1000 == 0 and volume is not None:
-                _save_checkpoint(base_model, optimizer, step, checkpoint_dir, volume)
+                _save_checkpoint(base_model, optimizer, scheduler, step, checkpoint_dir, volume)
 
     if volume is not None:
-        _save_checkpoint(base_model, optimizer, step, checkpoint_dir, volume, final=True)
+        _save_checkpoint(base_model, optimizer, scheduler, step, checkpoint_dir, volume, final=True)
 
     pbar.close()
 

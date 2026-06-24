@@ -34,20 +34,23 @@ def evaluate_model(
             tokenizer, batch_size=eval_batch_size, max_tokens=max_eval_tokens
         )
 
-        total_loss = 0.0
+        total_nats = 0.0
         total_tokens = 0
+        total_bytes_val = 0
         pbar = tqdm(dataloader, desc=f"Eval [{model_name}] {scenario}")
 
         for batch_idx, batch in enumerate(pbar):
             prompt_ids = batch["prompt_ids"].to(device)
             answer_ids = batch["answer_ids"].to(device)
+            pm = batch.get("prompt_mask")
+            am = batch.get("answer_mask")
 
             with torch.amp.autocast("cuda" if use_amp else "cpu", dtype=amp_dtype):
                 if scenario == "no_merge":
                     loss = model.forward_chat_no_compress(
                         prompt_ids, answer_ids,
-                        prompt_mask=batch.get("prompt_mask"),
-                        answer_mask=batch.get("answer_mask"),
+                        prompt_mask=pm.to(device) if pm is not None else None,
+                        answer_mask=am.to(device) if am is not None else None,
                     )
                 elif scenario == "random_merge":
                     rng = random.Random(batch_idx)
@@ -56,8 +59,8 @@ def evaluate_model(
                         tokenizer=tokenizer,
                         compression_ratio=0.5,
                         rng=rng,
-                        prompt_mask=batch.get("prompt_mask"),
-                        answer_mask=batch.get("answer_mask"),
+                        prompt_mask=pm.to(device) if pm is not None else None,
+                        answer_mask=am.to(device) if am is not None else None,
                     )
                 else:
                     raise ValueError(f"Unknown scenario: {scenario}")
@@ -65,22 +68,29 @@ def evaluate_model(
             if torch.isnan(loss) or torch.isinf(loss):
                 continue
 
-            am = batch.get("answer_mask")
             if am is not None:
                 num_tokens = am.sum().item()
             else:
                 num_tokens = (answer_ids != 0).sum().item()
-            total_loss += loss.item() * num_tokens
+
+            total_nats += loss.item() * num_tokens  # fix #6: nats = per-token-loss * tokens
             total_tokens += num_tokens
+
+            # fix #4: count decoded bytes for true bits-per-byte
+            for b in range(answer_ids.shape[0]):
+                real_len = int(am[b].sum().item()) if am is not None else (answer_ids[b] != 0).sum().item()
+                if real_len > 0:
+                    decoded = tokenizer.decode(answer_ids[b, :real_len].tolist(), skip_special_tokens=True)
+                    total_bytes_val += len(decoded.encode("utf-8"))
 
             if total_tokens >= max_eval_tokens:
                 break
 
             pbar.set_postfix({"loss": f"{loss.item():.4f}"})
 
-        avg_loss = total_loss / max(total_tokens, 1)
+        avg_loss = total_nats / max(total_tokens, 1)
         ppl = math.exp(min(avg_loss, 20))
-        bpb = avg_loss / math.log(2)
+        bpb = total_nats / (max(total_bytes_val, 1) * math.log(2))
 
         results[scenario] = {
             "loss": avg_loss,

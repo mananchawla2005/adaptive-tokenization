@@ -272,7 +272,7 @@ def evaluate_hybrid_fn():
 
     with torch.no_grad():
         random_bnd = sample_random_boundaries(prompt_t, 1, max_span_len=4)
-        random_loss = evaluate_boundaries_batch(adaptive_model, prompt_t, answer_t, random_bnd, 4)
+        random_loss = evaluate_boundaries_batch(adaptive_model, prompt_t, answer_t, random_bnd, 4, answer_mask=answer_m)
         random_loss = random_loss.mean().item()
         real_spans = (random_bnd & prompt_m.unsqueeze(0)).float().sum(dim=-1).mean().item()
         real_tokens = prompt_m.float().sum(dim=-1).mean().item()

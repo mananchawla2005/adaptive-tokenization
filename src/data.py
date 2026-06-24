@@ -10,11 +10,12 @@ MAX_ANSWER = 256
 
 
 class ChatDataset(IterableDataset):
-    def __init__(self, tokenizer, max_prompt=MAX_PROMPT, max_answer=MAX_ANSWER, max_tokens=TOTAL_TOKENS):
+    def __init__(self, tokenizer, max_prompt=MAX_PROMPT, max_answer=MAX_ANSWER, max_tokens=TOTAL_TOKENS, split="train"):
         self.tokenizer = tokenizer
         self.max_prompt = max_prompt
         self.max_answer = max_answer
         self.max_tokens = max_tokens
+        self.split = split
         self.dataset = load_dataset(
             "Open-Orca/OpenOrca",
             split="train",
@@ -23,7 +24,11 @@ class ChatDataset(IterableDataset):
 
     def __iter__(self):
         total_tokens = 0
-        for example in self.dataset:
+        # fix #3: skip examples for val split (deterministic shard after 100k examples)
+        skip = 1_000_000 if self.split == "val" else 0
+        for i, example in enumerate(self.dataset):
+            if i < skip:
+                continue
             question = example.get("question", "")
             response = example.get("response", "")
             system = example.get("system_prompt", "")
@@ -95,5 +100,5 @@ def create_dataloader(tokenizer, batch_size=4, max_tokens=TOTAL_TOKENS):
 
 
 def create_eval_dataloader(tokenizer, batch_size=4, max_tokens=5_000_000):
-    dataset = ChatDataset(tokenizer, max_tokens=max_tokens)
+    dataset = ChatDataset(tokenizer, max_tokens=max_tokens, split="val")
     return DataLoader(dataset, batch_size=batch_size, collate_fn=collate_fn)
