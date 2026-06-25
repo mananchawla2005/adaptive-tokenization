@@ -16,11 +16,11 @@ from tqdm import tqdm
 from .data import create_dataloader, TOTAL_TOKENS
 from .model import AdaptiveGPT2Model
 from .boundary_predictor import BoundaryPredictor
-from .boundary_sampling import sample_boundaries_grpo, boundaries_to_log_probs
+from .boundary_sampling import sample_boundaries_grpo, boundaries_to_log_probs, compute_grpo_log_probs
 
 
 BETA = 0.6
-LOSS_CEILING = 2.40  # no_merge baseline (2.288) + 5% margin
+LOSS_CEILING = 2.19  # no_merge baseline (2.085) + 5% margin
 K_SAMPLES = 128
 NUM_PROMPTS_ORACLE = 2000
 BCE_EPOCHS = 5
@@ -376,16 +376,18 @@ def stage3_train_grpo(
         std_r = rewards.std(dim=0, keepdim=True) + 1e-8
         advantages = (rewards - mean_r) / std_r
 
-        # Compute on-policy log-probs WITH gradient tracking (outside no_grad)
-        from .boundary_sampling import compute_grpo_log_probs
-        log_probs_per = compute_grpo_log_probs(
-            predictor, prompt_ids, boundaries, attention_mask=prompt_mask,
+        # Compute on-policy per-position log-probs WITH gradient tracking
+        log_probs, valid_mask, logit_reg = compute_grpo_log_probs(
+            predictor, prompt_ids, boundaries, attention_mask=prompt_mask, max_span_len=4,
         )
 
-        policy_loss = -(log_probs_per.flatten() * advantages.flatten()).mean()
+        # Policy loss: mean over all valid actions across all samples and prompts
+        weighted = log_probs * valid_mask.float() * advantages.unsqueeze(-1)
+        policy_loss = -weighted.sum() / valid_mask.float().sum().clamp_min(1)
+        total_loss = policy_loss + 0.001 * logit_reg
 
         optimizer.zero_grad()
-        policy_loss.backward()
+        total_loss.backward()
         torch.nn.utils.clip_grad_norm_(predictor.parameters(), 1.0)
         optimizer.step()
 

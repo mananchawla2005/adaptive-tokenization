@@ -55,10 +55,10 @@ Figure 1: Sweep of Adaptive Compression
 
 | Metric | 96-token prompt | 384-token prompt |
 |--------|----------------|------------------|
-| Naive no-merge | 5.26 | 4.49 |
-| Adaptive no-merge | 5.33 | 4.50 |
-| **Adaptive best (with compression)** | **4.92 (cr=57%)** | **3.90 (cr=61%)** |
-| Gain vs Naive | **+6.5% better** | **+13.1% better** |
+| Naive no-merge | 5.30 | 4.52 |
+| Adaptive no-merge | 5.37 | 4.48 |
+| **Adaptive best (with compression)** | **4.99 (cr=57%)** | **3.93 (cr=61%)** |
+| Gain vs Naive | **+5.9% better** | **+13.0% better** |
 
 Key finding from this experiment was that smartly compressing the input can *beat* no compression. Compression acts as a noise filter, improving prediction signal. Green zone extends to at least 65-70%.
 
@@ -75,10 +75,10 @@ Figure 2: Architecture diagram for Adaptive Tokenization
 
 | Model | No Merge (loss/ppl/bpb) | Random Merge (loss/ppl/bpb) | CORE ↓ |
 |-------|------------------------|-----------------------------|--------|
-| **Naive** | 1.968 / 7.16 / 2.84 | 2.501 / 12.20 / 3.61 | 1.271 |
-| **Adaptive** | 2.085 / 8.05 / 3.01 | 2.195 / 8.98 / 3.17 | **1.053** |
+| **Naive** | 1.669 / 5.30 / 0.524 | 2.416 / 11.20 / 0.759 | 1.448 |
+| **Adaptive** | 1.806 / 6.09 / 0.568 | 2.003 / 7.41 / 0.629 | **1.109** |
 
-CORE = merged_loss / no_merge_loss. Lower = less degradation. Adaptive reduces compression penalty from 27.1% → 5.3%.
+CORE = merged_loss / no_merge_loss. Lower = less degradation. Adaptive reduces compression penalty from 44.8% → 10.9%. bpb = true bits-per-byte.
 
 ### Pre vs Post Training of boundary predictor
 

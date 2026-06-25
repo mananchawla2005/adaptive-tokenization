@@ -64,19 +64,27 @@ def sample_boundaries_grpo(predictor, input_ids, attention_mask=None, num_sample
     return boundaries
 
 
-def compute_grpo_log_probs(predictor, input_ids, boundaries, attention_mask=None):
-    """Compute log-probs of given boundaries under the SAME biased sampling
-    distribution used by sample_boundaries_grpo. Must be called OUTSIDE
-    torch.no_grad() so that predictor gradients flow through to the GRPO loss.
+def compute_grpo_log_probs(predictor, input_ids, boundaries, attention_mask=None, max_span_len=4):
+    """Compute per-position log-probs and valid-action mask for GRPO.
+    Must be called OUTSIDE torch.no_grad() so predictor gradients flow.
 
-    Returns (S, B) tensor of log-probs per sample per prompt.
+    Returns:
+      log_probs: (S, B, L) per-position log-prob of sampled action
+      valid_mask: (S, B, L) True for positions that contribute to policy gradient.
+      logit_reg: scalar L1 penalty on logits to prevent saturation (logits → ±∞)
     """
     S, B, L = boundaries.shape
     device = input_ids.device
 
     logits = predictor.forward(input_ids, attention_mask)
-    biases = torch.tensor(GRPO_BIASES[:S], device=device)
-    log_probs = torch.zeros(S, B, device=device)
+    logit_reg = logits.abs().mean()  # prevent saturation to ±∞
+    if S == 1:
+        biases = torch.tensor([0.0], device=device)
+    else:
+        biases = torch.tensor(GRPO_BIASES[:S], device=device)
+
+    log_probs = torch.zeros(S, B, L, device=device)
+    valid_mask = torch.zeros(S, B, L, dtype=torch.bool, device=device)
 
     for k in range(S):
         bias = biases[k]
@@ -94,18 +102,27 @@ def compute_grpo_log_probs(predictor, input_ids, boundaries, attention_mask=None
         log_p_merge = torch.log((1.0 - p_boundary).clamp_min(1e-8))
 
         per_pos = bnd_k * log_p_bound + merge_k * log_p_merge
+        log_probs[k] = per_pos
 
+        # Reconstruct which positions were deterministic (forced by max_span_len)
+        merged_count = torch.zeros(B, L, dtype=torch.long, device=device)
+        valid = torch.ones(B, L, dtype=torch.bool, device=device)
         if attention_mask is not None:
-            mask = attention_mask.float()
-            mask[:, 0] = 0.0  # exclude forced first boundary
-            per_pos = per_pos * mask
-            norm = mask.sum(dim=-1).clamp_min(1)
-        else:
-            norm = L
+            valid = attention_mask.bool()
+        valid[:, 0] = False  # position 0 is always forced
 
-        log_probs[k] = per_pos.sum(dim=-1) / norm
+        for pos in range(1, L):
+            is_forced = merged_count[:, pos - 1] >= max_span_len - 1
+            valid[:, pos] = valid[:, pos] & (~is_forced)
+            merged_count[:, pos] = torch.where(
+                boundaries[k, :, pos],
+                torch.zeros(B, dtype=torch.long, device=device),
+                merged_count[:, pos - 1] + 1,
+            )
 
-    return log_probs
+        valid_mask[k] = valid
+
+    return log_probs, valid_mask, logit_reg
 
 
 def boundaries_to_log_probs(predictor, input_ids, boundaries, attention_mask=None):
